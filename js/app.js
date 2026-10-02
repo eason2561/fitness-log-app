@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.02-6 (Polar history)";
+const APP_VERSION = "2026.10.02-7 (heart-rate charts)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -650,6 +650,58 @@ async function saveWorkout(btn) {
 
 // ------------------------------------------------------------------ workout detail
 
+// Heart rate over time for a Polar session (data/clean/hr/<id>.json, 5-second averages).
+const hrCache = new Map();
+
+function hrCardHTML() {
+  return `<h2>Heart rate</h2><div class="card" id="hr-card"><p class="small muted">Loading heart rate…</p></div>`;
+}
+
+async function drawHr(pl) {
+  const card = document.getElementById("hr-card");
+  let d = hrCache.get(pl.hr_file);
+  try {
+    if (!d) {
+      d = JSON.parse(await gh.getRaw(pl.hr_file));
+      hrCache.set(pl.hr_file, d);
+    }
+  } catch (e) {
+    if (card) card.innerHTML = `<p class="small muted">${e instanceof gh.NetworkError ? "The heart-rate chart needs a connection." : esc(e.message)}</p>`;
+    return;
+  }
+  if (!card || !card.isConnected) return; // navigated away while loading
+  const c = themeColors();
+  const pts = d.bpm.map((v, i) => ({ x: (i * d.step_s) / 60, y: v }));
+  const vals = d.bpm.filter((v) => v != null);
+  const clock = (min) => { const t = Math.round(min * 60); return `${Math.floor(t / 60)}:${pad(t % 60)}`; };
+  const counted = d.zone_seconds.reduce((a, b) => a + b, 0) + (d.below_zones_s || 0);
+  const mm = (sec) => `${Math.floor(sec / 60)}:${pad(Math.round(sec % 60))}`;
+  const pct = (sec) => (counted ? `${Math.round((100 * sec) / counted)}%` : "–");
+  const zoneRows = d.zones.map(([lo, hi], i) => [`Zone ${i + 1}`, `${lo}–${hi}`, mm(d.zone_seconds[i]), pct(d.zone_seconds[i])]);
+  if (d.below_zones_s) zoneRows.unshift(["Below zone 1", `< ${d.zones[0][0]}`, mm(d.below_zones_s), pct(d.below_zones_s)]);
+  const perMinute = [];
+  pts.forEach((p) => {
+    const m = Math.floor(p.x);
+    if (p.y == null) return;
+    (perMinute[m] ??= []).push(p.y);
+  });
+  card.innerHTML = `<p class="small muted">Avg ${esc(pl.avg_hr ?? Math.round(vals.reduce((a, b) => a + b, 0) / vals.length))} ·
+      max ${esc(pl.max_hr ?? Math.max(...vals))} bpm</p>
+    <div class="chart-box"><canvas id="c-hr" role="img" aria-label="Heart rate over time"></canvas></div>
+    ${d.zones.length ? `<h3 class="hr-zones-title">Time in heart-rate zones</h3><div class="table-wrap"><table><thead><tr><th>Zone</th>
+      <th class="r">bpm</th><th class="r">Time</th><th class="r">Share</th></tr></thead><tbody>${zoneRows.map((r) =>
+      `<tr><td>${esc(r[0])}</td><td class="r">${esc(r[1])}</td><td class="r">${esc(r[2])}</td><td class="r">${esc(r[3])}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    <details><summary>Show minute-by-minute table</summary><div class="table-wrap"><table><thead><tr><th>Minute</th><th class="r">Avg bpm</th></tr></thead>
+      <tbody>${perMinute.map((v, m) => v ? `<tr><td>${m}–${m + 1}</td><td class="r">${Math.round(v.reduce((a, b) => a + b, 0) / v.length)}</td></tr>` : "").join("")}</tbody></table></div></details>`;
+  const o = baseOptions(c);
+  o.scales.x = { ...o.scales.x, type: "linear", min: 0, max: pts.length ? pts.at(-1).x : 1,
+    ticks: { ...o.scales.x.ticks, callback: (v) => `${Math.round(v)} min` } };
+  o.scales.y.beginAtZero = false;
+  o.plugins.tooltip.callbacks = { title: (items) => clock(items[0].parsed.x), label: (ctx) => `${ctx.parsed.y} bpm` };
+  const line = { ...lineDataset(c, "Heart rate (bpm)", pts, c.s1), pointRadius: 0, pointHoverRadius: 4, spanGaps: false };
+  addChart("c-hr", { type: "line", data: { datasets: [line] }, options: o });
+}
+
 function renderWorkout(_params, [id]) {
   const w = allWorkouts().find((x) => x.id === id);
   if (!w) {
@@ -676,8 +728,10 @@ function renderWorkout(_params, [id]) {
       <h1>${esc(w.title)} <span class="badge">Polar</span></h1>
       <p class="secondary">${longDate(w.date)}${w.start ? ` · ${esc(w.start)}` : ""}</p>
       ${polarCard}
-      <p class="small muted">Recorded on your Polar watch. Add the sets or machine numbers and they'll be saved together with this session.</p>
+      ${pl.hr_file ? hrCardHTML() : ""}
+      <p class="small muted">Recorded with Polar. Add the sets or machine numbers and they'll be saved together with this session.</p>
       <div class="row"><a class="btn primary" href="#/edit?polar=${encodeURIComponent(pl.polar_id)}">Add workout details</a></div>`;
+    if (pl.hr_file) drawHr(pl);
     return;
   }
   view.innerHTML = `
@@ -693,6 +747,7 @@ function renderWorkout(_params, [id]) {
       <th class="r">Heaviest (lb)</th><th class="r">Volume (lb)</th></tr></thead><tbody>${exRows}</tbody></table></div>` : ""}
     ${cardio}
     ${polarCard}
+    ${pl?.hr_file ? hrCardHTML() : ""}
     ${w.notes ? `<h2>Notes</h2><div class="card">${esc(w.notes)}</div>` : ""}
     <div class="row">
       <a class="btn" href="#/edit?id=${encodeURIComponent(w.id)}">Edit</a>
@@ -700,6 +755,7 @@ function renderWorkout(_params, [id]) {
       <button class="danger" id="del-btn">Delete</button>
       <a class="btn" href="${esc(repoUrl(workoutPath(w.id)))}" target="_blank" rel="noopener">View file on GitHub</a>
     </div>`;
+  if (pl?.hr_file) drawHr(pl);
   document.getElementById("del-btn").onclick = async (e) => {
     if (!confirm(`Delete "${w.title}" on ${w.date}? This removes the file from the repo (git history keeps a copy).`)) return;
     e.target.disabled = true;

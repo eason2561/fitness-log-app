@@ -205,3 +205,4 @@ details summary { cursor: pointer; color: var(--accent); font-size: 0.85rem; mar
   background: var(--ink); color: var(--page); padding: 10px 16px; border-radius: 10px; font-size: 0.9rem;
   max-width: calc(100vw - 32px);
 }
+.hr-zones-title { margin: 16px 0 4px; }
