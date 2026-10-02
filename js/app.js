@@ -244,7 +244,7 @@ function renderHome() {
     <div class="big-actions">
       <a class="btn primary" href="#/new">Log workout</a>
       <a class="btn" href="#/photo">Life Fitness photo</a>
-      <a class="btn" href="#/measure">Blood pressure / weight</a>
+      <a class="btn" href="#/measure">BP / weight / fasting</a>
     </div>
     ${bp ? `<div class="card spread"><span><span class="secondary small">Latest blood pressure</span><br>
       <strong class="num">${bp.systolic}/${bp.diastolic}</strong>${bp.pulse ? ` <span class="muted">· pulse ${bp.pulse}</span>` : ""}</span>
@@ -705,11 +705,12 @@ function renderHistory(params) {
   } else if (tab === "measurements") {
     const ms = allMeasurements().slice().reverse();
     const desc = (m) => m.kind === "blood_pressure" ? `${m.systolic}/${m.diastolic}${m.pulse ? ` · pulse ${m.pulse}` : ""}`
-      : m.kind === "weight" ? `${fmt(m.weight_lb, 1)} lb${m.body_fat_pct ? ` · ${m.body_fat_pct}% fat` : ""}` : `${m.bpm} bpm`;
-    const kindName = { blood_pressure: "Blood pressure", weight: "Weight", resting_hr: "Resting HR" };
+      : m.kind === "weight" ? `${fmt(m.weight_lb, 1)} lb${m.body_fat_pct ? ` · ${m.body_fat_pct}% fat` : ""}`
+      : m.kind === "fasting" ? `Fasted${m.hours ? ` ${fmt(m.hours, 1)} h` : ""}` : `${m.bpm} bpm`;
+    const kindName = { blood_pressure: "Blood pressure", weight: "Weight", resting_hr: "Resting HR", fasting: "Fasting day" };
     body = `<div class="card">${ms.length ? `<ul class="list">${ms.map((m) => `<li><div class="item">
       <span><strong class="num">${esc(desc(m))}</strong><br><span class="meta">${kindName[m.kind] || esc(m.kind)}${m.notes ? ` · ${esc(m.notes)}` : ""}</span></span>
-      <span class="meta num">${esc(m.taken_at.replace("T", " "))}</span></div></li>`).join("")}</ul>` : `<p class="muted">No measurements yet.</p>`}</div>
+      <span class="meta num">${esc(m.kind === "fasting" ? m.taken_at.slice(0, 10) : m.taken_at.replace("T", " "))}</span></div></li>`).join("")}</ul>` : `<p class="muted">No measurements yet.</p>`}</div>
       <a class="btn" href="#/measure">Add a reading</a>`;
   } else {
     const ps = state.bundle.pending_photos || [];
@@ -738,7 +739,7 @@ function baseOptions(c, { legend = false, yTitle } = {}) {
     interaction: { mode: "index", intersect: false },
     plugins: {
       legend: { display: legend, position: "top", align: "start",
-        labels: { color: c.ink2, usePointStyle: true, pointStyle: "circle", boxWidth: 8, boxHeight: 8 } },
+        labels: { color: c.ink2, usePointStyle: true, boxWidth: 8, boxHeight: 8 } },
       tooltip: { backgroundColor: c.ink, titleColor: c.surface, bodyColor: c.surface, padding: 10, cornerRadius: 8,
         boxPadding: 4, usePointStyle: true },
     },
@@ -774,6 +775,58 @@ function lineDataset(c, label, data, color) {
     pointBorderColor: c.surface, pointBorderWidth: 2, borderJoinStyle: "round", borderCapStyle: "round", tension: 0, spanGaps: true };
 }
 
+// Weight over time on a true day axis, with fasting days as markers on the line.
+const dayNum = (iso) => Math.round(Date.parse(`${iso.slice(0, 10)}T00:00:00Z`) / 86400000);
+const dayLabel = (n) => new Date(n * 86400000).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+
+function weightAt(points, x) {
+  // Weight on day x: that day's reading, else interpolated between neighbours, else the nearest one.
+  const exact = points.find((p) => p.x === x);
+  if (exact) return exact.y;
+  const before = points.filter((p) => p.x < x).at(-1);
+  const after = points.find((p) => p.x > x);
+  if (before && after) return before.y + ((after.y - before.y) * (x - before.x)) / (after.x - before.x);
+  return (before || after).y;
+}
+
+function weightChartConfig(c, wt, fasts) {
+  const pts = wt.map((m) => ({ x: dayNum(m.taken_at), y: m.weight_lb }));
+  const fastPts = fasts.map((m) => {
+    const x = dayNum(m.taken_at);
+    return { x, y: Math.round(weightAt(pts, x) * 10) / 10, hours: m.hours, fasting: true };
+  });
+  const line = lineDataset(c, "Weight (lb)", pts, c.s1);
+  if (pts.length > 60) Object.assign(line, { pointRadius: 0, pointHoverRadius: 5 });
+  const datasets = [line];
+  if (fastPts.length) {
+    datasets.push({ type: "scatter", label: "Fasting day", data: fastPts, showLine: false, pointStyle: "triangle",
+      pointRadius: 7, pointHoverRadius: 9, backgroundColor: c.s2, hoverBackgroundColor: c.s2,
+      borderColor: c.surface, hoverBorderColor: c.surface, borderWidth: 2 });
+  }
+  const o = baseOptions(c, { legend: fastPts.length > 0 });
+  o.interaction = { mode: "nearest", axis: "x", intersect: false };
+  o.scales.x = { ...o.scales.x, type: "linear", min: Math.min(...pts.map((p) => p.x), ...fastPts.map((p) => p.x)),
+    max: Math.max(...pts.map((p) => p.x), ...fastPts.map((p) => p.x)), ticks: { ...o.scales.x.ticks, callback: dayLabel } };
+  o.scales.y.beginAtZero = false;
+  o.plugins.tooltip.callbacks = {
+    title: (items) => dayLabel(items[0].parsed.x),
+    label: (ctx) => ctx.raw.fasting
+      ? `Fasting day${ctx.raw.hours ? ` (${fmt(ctx.raw.hours, 1)} h)` : ""}`
+      : `Weight ${fmt(ctx.parsed.y, 1)} lb`,
+  };
+  return { type: "line", data: { datasets }, options: o };
+}
+
+function weightTableRows(wt, fasts) {
+  const rows = new Map();
+  for (const m of wt) rows.set(m.taken_at.slice(0, 10), { w: fmt(m.weight_lb, 1), f: "" });
+  for (const m of fasts) {
+    const d = m.taken_at.slice(0, 10);
+    rows.set(d, { w: rows.get(d)?.w ?? "–", f: m.hours ? `Yes (${fmt(m.hours, 1)} h)` : "Yes" });
+  }
+  return [...rows.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([d, r]) => [d, r.w, r.f]);
+}
+
 function renderProgress(params) {
   const range = params.range || "12";
   const ws = allWorkouts();
@@ -783,7 +836,11 @@ function renderProgress(params) {
   const byWeek = new Map(weekly(ws).map((w) => [w.week, w]));
   const end = new Date(`${weekStart(localIsoDate())}T12:00:00`);
   let start;
-  if (range === "all") start = new Date(`${(weekly(ws)[0]?.week) || localIsoDate(end)}T12:00:00`);
+  if (range === "all") {
+    // Earliest workout or reading, whichever comes first.
+    const firsts = [weekly(ws)[0]?.week, allMeasurements()[0]?.taken_at.slice(0, 10)].filter(Boolean).sort();
+    start = new Date(`${firsts.length ? weekStart(firsts[0]) : localIsoDate(end)}T12:00:00`);
+  }
   else { start = new Date(end); start.setDate(start.getDate() - 7 * (Number(range) - 1)); }
   const weeks = [];
   for (const d = new Date(start); d <= end; d.setDate(d.getDate() + 7)) {
@@ -802,6 +859,7 @@ function renderProgress(params) {
 
   const bp = allMeasurements().filter((m) => m.kind === "blood_pressure" && m.taken_at.slice(0, 10) >= sinceIso);
   const wt = allMeasurements().filter((m) => m.kind === "weight" && m.taken_at.slice(0, 10) >= sinceIso);
+  const fasts = allMeasurements().filter((m) => m.kind === "fasting" && m.taken_at.slice(0, 10) >= sinceIso);
 
   const rangeBtn = (r, label) => `<button data-go="#/progress?range=${r}${ex ? `&ex=${encodeURIComponent(ex)}` : ""}" aria-pressed="${range === r}">${label}</button>`;
   const wkRows = (key, d = 0) => weeks.map((w) => [`Week of ${w.week}`, fmt(w[key], d)]);
@@ -829,7 +887,8 @@ function renderProgress(params) {
       ${bp.length ? chartCard("c-bp", "Blood pressure (mmHg)", null, ["Taken", "Systolic", "Diastolic", "Pulse"],
         bp.map((m) => [m.taken_at.replace("T", " "), m.systolic, m.diastolic, m.pulse ?? "–"])) :
         `<div class="card muted">No blood pressure readings in this range.</div>`}
-      ${wt.length ? chartCard("c-weight", "Body weight (lb)", null, ["Taken", "Weight (lb)"], wt.map((m) => [m.taken_at.replace("T", " "), fmt(m.weight_lb, 1)])) : ""}
+      ${wt.length ? chartCard("c-weight", "Body weight (lb)", fasts.length ? "Triangles mark fasting days" : null,
+        ["Date", "Weight (lb)", "Fasting"], weightTableRows(wt, fasts)) : ""}
     </div>`;
 
   const pick = document.getElementById("ex-pick");
@@ -853,19 +912,14 @@ function renderProgress(params) {
       datasets: [lineDataset(c, "Systolic", bp.map((m) => m.systolic), c.s1), lineDataset(c, "Diastolic", bp.map((m) => m.diastolic), c.s2)] },
       options: o });
   }
-  if (wt.length) {
-    const o = baseOptions(c);
-    o.scales.y.beginAtZero = false;
-    addChart("c-weight", { type: "line", data: { labels: wt.map((m) => shortDate(m.taken_at.slice(0, 10))),
-      datasets: [lineDataset(c, "Weight (lb)", wt.map((m) => m.weight_lb), c.s1)] }, options: o });
-  }
+  if (wt.length) addChart("c-weight", weightChartConfig(c, wt, fasts));
 }
 
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
   if (location.hash.startsWith("#/progress")) route();
 });
 
-// ------------------------------------------------------------------ measurements (BP / weight / resting HR)
+// ------------------------------------------------------------------ measurements (BP / weight / resting HR / fasting)
 
 function renderMeasure(params) {
   const kind = params.kind || "blood_pressure";
@@ -880,25 +934,30 @@ function renderMeasure(params) {
     weight: `<div class="grid-2">${n("weight", "Weight (lb)", 'inputmode="decimal" step="any" required min="1"')}
         ${n("body_fat_pct", "Body fat %", 'inputmode="decimal" step="any" min="1" max="75"')}</div>`,
     resting_hr: n("bpm", "Resting heart rate (bpm)", 'inputmode="numeric" required min="20" max="200"'),
+    fasting: n("hours", "Hours fasted (optional)", 'inputmode="decimal" step="any" min="1" max="168"'),
   }[kind];
+  const when = kind === "fasting"
+    ? `<label>Day<input type="date" name="day" value="${localIsoDate()}" required></label>`
+    : `<label>Taken<input type="datetime-local" name="taken_at" value="${nowLocal()}" required></label>`;
   view.innerHTML = `${setupNotice()}<h1>Add a reading</h1>
-    <div class="segmented" role="group" aria-label="Reading type">${seg("blood_pressure", "Blood pressure")}${seg("weight", "Weight")}${seg("resting_hr", "Resting HR")}</div>
+    <div class="segmented" role="group" aria-label="Reading type">${seg("blood_pressure", "Blood pressure")}${seg("weight", "Weight")}${seg("resting_hr", "Resting HR")}${seg("fasting", "Fasting")}</div>
     <form id="m-form" class="card stack">
-      <label>Taken<input type="datetime-local" name="taken_at" value="${nowLocal()}" required></label>
+      ${when}
       ${fields}
       <label>Notes<input name="notes" placeholder="optional"></label>
       <button class="primary" type="submit">Save reading</button>
     </form>
-    ${kind === "blood_pressure" ? `<p class="small muted">Taking 2–3 readings? Save each one; they're kept separately.</p>` : ""}`;
+    ${kind === "blood_pressure" ? `<p class="small muted">Taking 2–3 readings? Save each one; they're kept separately.</p>` : ""}
+    ${kind === "fasting" ? `<p class="small muted">Fasting days show as markers on the body weight chart in Progress.</p>` : ""}`;
 
   document.getElementById("m-form").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
-    const m = { kind, taken_at: f.get("taken_at") };
+    const m = { kind, taken_at: kind === "fasting" ? `${f.get("day")}T00:00` : f.get("taken_at") };
     const ints = ["systolic", "diastolic", "pulse", "bpm"];
-    const floats = ["weight", "body_fat_pct"];
+    const floats = ["weight", "body_fat_pct", "hours"];
     for (const [k, v] of f.entries()) {
-      if (k === "taken_at" || v === "") continue;
+      if (k === "taken_at" || k === "day" || v === "") continue;
       if (ints.includes(k)) m[k] = parseInt(v, 10);
       else if (floats.includes(k)) m[k] = parseFloat(v);
       else if (k === "irregular_heartbeat") m[k] = true;
@@ -906,7 +965,7 @@ function renderMeasure(params) {
     }
     if (kind === "blood_pressure" && m.systolic <= m.diastolic) return toast("Systolic should be higher than diastolic.");
     if (kind === "weight") m.unit = "lb";
-    const label = { blood_pressure: "bp", weight: "weight", resting_hr: "rhr" }[kind];
+    const label = { blood_pressure: "bp", weight: "weight", resting_hr: "rhr", fasting: "fast" }[kind];
     const id = `${m.taken_at.slice(0, 10)}-${m.taken_at.slice(11, 16).replace(":", "")}-${label}-${randomTag()}`;
     const path = `data/manual/measurements/${id.slice(0, 4)}/${id}.yaml`;
     const btn = e.target.querySelector("button[type=submit]");
