@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.02-7 (heart-rate charts)";
+const APP_VERSION = "2026.10.02-8 (Withings)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -796,11 +796,11 @@ function renderHistory(params) {
   } else if (tab === "measurements") {
     const ms = allMeasurements().slice().reverse();
     const desc = (m) => m.kind === "blood_pressure" ? `${m.systolic}/${m.diastolic}${m.pulse ? ` · pulse ${m.pulse}` : ""}`
-      : m.kind === "weight" ? `${fmt(m.weight_lb, 1)} lb${m.body_fat_pct ? ` · ${m.body_fat_pct}% fat` : ""}`
+      : m.kind === "weight" ? `${fmt(m.weight_lb, 1)} lb${m.body_fat_pct ? ` · ${m.body_fat_pct}% fat` : ""}${m.muscle_mass_lb ? ` · ${fmt(m.muscle_mass_lb, 1)} lb muscle` : ""}`
       : m.kind === "fasting" ? `Fasted${m.hours ? ` ${fmt(m.hours, 1)} h` : ""}` : `${m.bpm} bpm`;
     const kindName = { blood_pressure: "Blood pressure", weight: "Weight", resting_hr: "Resting HR", fasting: "Fasting day" };
     body = `<div class="card">${ms.length ? `<ul class="list">${ms.map((m) => `<li><div class="item">
-      <span><strong class="num">${esc(desc(m))}</strong><br><span class="meta">${kindName[m.kind] || esc(m.kind)}${m.notes ? ` · ${esc(m.notes)}` : ""}</span></span>
+      <span><strong class="num">${esc(desc(m))}</strong><br><span class="meta">${kindName[m.kind] || esc(m.kind)}${m.source === "withings" ? " · Withings" : ""}${m.notes ? ` · ${esc(m.notes)}` : ""}</span></span>
       <span class="meta num">${esc(m.kind === "fasting" ? m.taken_at.slice(0, 10) : m.taken_at.replace("T", " "))}</span></div></li>`).join("")}</ul>` : `<p class="muted">No measurements yet.</p>`}</div>
       <a class="btn" href="#/measure">Add a reading</a>`;
   } else {
@@ -949,6 +949,8 @@ function renderProgress(params) {
   const bp = allMeasurements().filter((m) => m.kind === "blood_pressure" && m.taken_at.slice(0, 10) >= sinceIso);
   const wt = allMeasurements().filter((m) => m.kind === "weight" && m.taken_at.slice(0, 10) >= sinceIso);
   const fasts = allMeasurements().filter((m) => m.kind === "fasting" && m.taken_at.slice(0, 10) >= sinceIso);
+  const fat = wt.filter((m) => m.body_fat_pct != null);
+  const muscle = wt.filter((m) => m.muscle_mass_lb != null);
 
   const rangeBtn = (r, label) => `<button data-go="#/progress?range=${r}${ex ? `&ex=${encodeURIComponent(ex)}` : ""}" aria-pressed="${range === r}">${label}</button>`;
   const wkRows = (key, d = 0) => weeks.map((w) => [`Week of ${w.week}`, fmt(w[key], d)]);
@@ -978,6 +980,10 @@ function renderProgress(params) {
         `<div class="card muted">No blood pressure readings in this range.</div>`}
       ${wt.length ? chartCard("c-weight", "Body weight (lb)", fasts.length ? "Triangles along the bottom mark fasting days" : null,
         ["Date", "Weight (lb)", "Fasting"], weightTableRows(wt, fasts)) : ""}
+      ${fat.length ? chartCard("c-fat", "Body fat (%)", "From the Withings scale", ["Taken", "Body fat (%)"],
+        fat.map((m) => [m.taken_at.replace("T", " "), fmt(m.body_fat_pct, 1)])) : ""}
+      ${muscle.length ? chartCard("c-muscle", "Muscle mass (lb)", "From the Withings scale", ["Taken", "Muscle mass (lb)"],
+        muscle.map((m) => [m.taken_at.replace("T", " "), fmt(m.muscle_mass_lb, 1)])) : ""}
     </div>`;
 
   const pick = document.getElementById("ex-pick");
@@ -1002,6 +1008,19 @@ function renderProgress(params) {
       options: o });
   }
   if (wt.length) addChart("c-weight", weightChartConfig(c, wt, fasts));
+  for (const [id, rows, key, label] of [["c-fat", fat, "body_fat_pct", "Body fat (%)"], ["c-muscle", muscle, "muscle_mass_lb", "Muscle mass (lb)"]]) {
+    if (!rows.length) continue;
+    const pts = rows.map((m) => ({ x: dayNum(m.taken_at), y: m[key] }));
+    const line = lineDataset(c, label, pts, c.s1);
+    if (pts.length > 60) Object.assign(line, { pointRadius: 0, pointHoverRadius: 5 });
+    const o = baseOptions(c);
+    o.scales.x = { ...o.scales.x, type: "linear", min: pts[0].x - 1, max: pts.at(-1).x + 1,
+      ticks: { ...o.scales.x.ticks, callback: (v) => dayLabel(Math.round(v)) } };
+    o.scales.y.beginAtZero = false;
+    o.scales.y.ticks.precision = undefined;
+    o.plugins.tooltip.callbacks = { title: (items) => dayLabel(items[0].parsed.x), label: (ctx) => `${label}: ${fmt(ctx.parsed.y, 1)}` };
+    addChart(id, { type: "line", data: { datasets: [line] }, options: o });
+  }
 }
 
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
@@ -1174,6 +1193,17 @@ async function renderSettings() {
         <strong>Actions: Read and write</strong>.</p>
       <p id="polar-status" class="small"></p>
     </div>
+    <h2>Withings scale</h2>
+    <div class="card stack">
+      ${withingsStatus()}
+      <label>Withings client ID<input id="withings-client" value="${esc(s.withingsClientId || "")}" autocapitalize="off" placeholder="from developer.withings.com"></label>
+      <div class="row">
+        <button type="button" id="withings-connect">${withingsReadings().length ? "Reconnect Withings" : "Connect Withings"}</button>
+        <button type="button" id="withings-sync">Sync Withings now</button>
+      </div>
+      <p class="field-hint">Approve quickly when Withings asks: its sign-in codes expire after about 30 seconds.</p>
+      <p id="withings-status" class="small"></p>
+    </div>
     <h2>Waiting to sync</h2>
     <div class="card">${ops.length ? `<ul class="list">${ops.map((o) => `<li><div class="item"><span>${esc(o.message)}<br>
         <span class="meta">${esc(o.path)}</span>${o.error ? `<br><span class="small notice error">${esc(o.error)}</span>` : ""}</span>
@@ -1211,8 +1241,8 @@ async function renderSettings() {
     if (!clientId) return toast("Enter your Polar client ID first.");
     gh.saveSettings({ ...gh.loadSettings(), polarClientId: clientId });
     const stateTag = `polar-${Math.random().toString(36).slice(2, 10)}`;
-    sessionStorage.setItem("fitlog:polarState", stateTag);
-    try { localStorage.setItem("fitlog:polarState", stateTag); } catch {}
+    sessionStorage.setItem("fitlog:oauthState", stateTag);
+    try { localStorage.setItem("fitlog:oauthState", stateTag); } catch {}
     location.href = `https://flow.polar.com/oauth2/authorization?response_type=code&client_id=${encodeURIComponent(clientId)}&state=${stateTag}`;
   };
   document.getElementById("polar-sync").onclick = async (e) => {
@@ -1223,6 +1253,30 @@ async function renderSettings() {
       pStatus.textContent = "Sync started. New sessions appear in about a minute (use Reload data).";
     } catch (err) {
       pStatus.innerHTML = workflowHelp(err, "polar-sync.yml", "Sync Polar");
+    } finally {
+      e.target.disabled = false;
+    }
+  };
+  const wStatus = document.getElementById("withings-status");
+  document.getElementById("withings-connect").onclick = () => {
+    const clientId = document.getElementById("withings-client").value.trim();
+    if (!clientId) return toast("Enter your Withings client ID first.");
+    gh.saveSettings({ ...gh.loadSettings(), withingsClientId: clientId });
+    const stateTag = `withings-${Math.random().toString(36).slice(2, 10)}`;
+    sessionStorage.setItem("fitlog:oauthState", stateTag);
+    try { localStorage.setItem("fitlog:oauthState", stateTag); } catch {}
+    const q = new URLSearchParams({ response_type: "code", client_id: clientId, scope: "user.metrics",
+      redirect_uri: appRedirectUri(), state: stateTag });
+    location.href = `https://account.withings.com/oauth2_user/authorize2?${q}`;
+  };
+  document.getElementById("withings-sync").onclick = async (e) => {
+    e.target.disabled = true;
+    wStatus.textContent = "Starting sync…";
+    try {
+      await gh.dispatchWorkflow("withings-sync.yml");
+      wStatus.textContent = "Sync started. New weigh-ins appear in about a minute (use Reload data).";
+    } catch (err) {
+      wStatus.innerHTML = workflowHelp(err, "withings-sync.yml", "Sync Withings");
     } finally {
       e.target.disabled = false;
     }
@@ -1257,6 +1311,21 @@ function polarStatus() {
   return `<p class="small secondary">${ps.length} Polar session${ps.length === 1 ? "" : "s"} synced · latest ${esc(shortDate(last))}</p>`;
 }
 
+function withingsReadings() {
+  return state.bundle.measurements.filter((m) => m.source === "withings");
+}
+
+function withingsStatus() {
+  const ws = withingsReadings();
+  if (!ws.length) return `<p class="small secondary">Not connected yet, or no weigh-ins synced.</p>`;
+  const last = ws.at(-1);
+  return `<p class="small secondary">${ws.length} weigh-in${ws.length === 1 ? "" : "s"} synced · latest ${esc(last.taken_at.replace("T", " "))}
+    (${fmt(last.weight_lb, 1)} lb)</p>`;
+}
+
+// Where Withings sends you back after approving; must match the callback registered with Withings.
+const appRedirectUri = () => location.origin + location.pathname;
+
 function workflowHelp(err, file, name) {
   const s = gh.loadSettings();
   const url = `https://github.com/${encodeURIComponent(s.owner)}/${encodeURIComponent(s.repo)}/actions/workflows/${file}`;
@@ -1266,37 +1335,46 @@ function workflowHelp(err, file, name) {
   return `${why} You can run it on GitHub instead: <a href="${esc(url)}" target="_blank" rel="noopener">Actions → ${esc(name)} → Run workflow</a>.`;
 }
 
-// Polar sends you back here as ?code=…&state=… after you approve access.
-async function handlePolarReturn() {
+// Polar and Withings send you back here as ?code=…&state=<service>-… after you approve access.
+async function handleOAuthReturn() {
   const q = new URLSearchParams(location.search);
   const code = q.get("code");
   if (!code) return;
-  const expected = sessionStorage.getItem("fitlog:polarState") ||
-    (() => { try { return localStorage.getItem("fitlog:polarState"); } catch { return null; } })();
+  const returned = q.get("state") || "";
+  const read = (k) => sessionStorage.getItem(k) || (() => { try { return localStorage.getItem(k); } catch { return null; } })();
+  const expected = read("fitlog:oauthState") || read("fitlog:polarState");
   history.replaceState(null, "", location.pathname + "#/settings");
-  if (q.get("state") && expected && q.get("state") !== expected) {
-    toast("Ignored a Polar sign-in that this device didn't start.", 6000);
-    return;
+  if (returned && expected && returned !== expected) {
+    toast("Ignored a sign-in that this device didn't start.", 6000);
+    return route();
   }
-  sessionStorage.removeItem("fitlog:polarState");
-  try { localStorage.removeItem("fitlog:polarState"); } catch {}
+  for (const k of ["fitlog:oauthState", "fitlog:polarState"]) {
+    sessionStorage.removeItem(k);
+    try { localStorage.removeItem(k); } catch {}
+  }
+  const service = (returned || expected || "polar").startsWith("withings") ? "Withings" : "Polar";
+  const file = service === "Withings" ? "withings-connect.yml" : "polar-connect.yml";
+  const inputs = service === "Withings" ? { code, redirect_uri: appRedirectUri() } : { code };
   state.hold = true; // keep this message up even if a data refresh finishes meanwhile
-  view.innerHTML = `<h1>Connecting Polar…</h1><div class="card"><p id="pc-msg">Starting the Connect Polar workflow…</p></div>`;
+  view.innerHTML = `<h1>Connecting ${service}…</h1><div class="card"><p id="pc-msg">Starting the Connect ${service} workflow…</p></div>`;
   const msg = document.getElementById("pc-msg");
   try {
-    await gh.dispatchWorkflow("polar-connect.yml", { code });
-    msg.innerHTML = `Polar access approved. GitHub is finishing the connection and pulling your recent sessions; this takes about a minute.
-      Then tap <strong>Reload data</strong> in Settings.<br><br><a class="btn" href="#/settings">Back to Settings</a>`;
+    await gh.dispatchWorkflow(file, inputs);
+    msg.innerHTML = `${service} access approved. GitHub is finishing the connection and pulling your data; this takes about a minute.
+      Then tap <strong>Reload data</strong> in Settings.${service === "Withings" ? " If the Connect Withings run fails because the code expired, tap Connect Withings again." : ""}
+      <br><br><a class="btn" href="#/settings">Back to Settings</a>`;
   } catch (err) {
-    msg.innerHTML = `${workflowHelp(err, "polar-connect.yml", "Connect Polar")}<br><br>
-      Paste this code as the <strong>code</strong> input within 10 minutes:<br>
-      <input readonly value="${esc(code)}" aria-label="Polar authorization code"><br><br><a class="btn" href="#/settings">Back to Settings</a>`;
+    msg.innerHTML = `${workflowHelp(err, file, `Connect ${service}`)}<br><br>
+      Paste this code as the <strong>code</strong> input right away:<br>
+      <input readonly value="${esc(code)}" aria-label="Authorization code">
+      ${service === "Withings" ? `<br>and this as <strong>redirect_uri</strong>:<br><input readonly value="${esc(appRedirectUri())}" aria-label="Redirect URI">` : ""}
+      <br><br><a class="btn" href="#/settings">Back to Settings</a>`;
   }
 }
 
 // ------------------------------------------------------------------ startup
 
-if (new URLSearchParams(location.search).has("code")) handlePolarReturn();
+if (new URLSearchParams(location.search).has("code")) handleOAuthReturn();
 else route();
 refresh({ quiet: true });
 syncNow();
