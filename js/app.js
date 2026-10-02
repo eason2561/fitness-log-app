@@ -5,6 +5,8 @@ import * as gh from "./github.js";
 import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
+// Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
+const APP_VERSION = "2026.10.02-3 (fasting markers)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -1081,6 +1083,7 @@ async function renderSettings() {
     <h2>This device</h2>
     <div class="card stack">
       <p class="small secondary">Install on your phone: open this page in Chrome, tap ⋮ then <strong>Add to Home screen</strong>.</p>
+      <p class="small muted">App version ${esc(APP_VERSION)}</p>
       <button type="button" id="s-clear" class="danger">Clear cached data on this device</button>
     </div>`;
 
@@ -1129,5 +1132,14 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && Date.now() - readJSON("fitlog:refreshedAt", 0) > 120000) refresh({ quiet: true });
 });
 if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost")) {
-  navigator.serviceWorker.register("sw.js").catch(() => {});
+  // When a new version's service worker takes over, reload once so the new code is what's running.
+  const hadController = Boolean(navigator.serviceWorker.controller);
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (hadController && !reloaded && !state.editor) {
+      reloaded = true;
+      location.reload();
+    }
+  });
+  navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).catch(() => {});
 }
