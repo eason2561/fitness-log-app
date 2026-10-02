@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.02-3 (fasting markers)";
+const APP_VERSION = "2026.10.02-4 (fasting markers below line)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -777,25 +777,20 @@ function lineDataset(c, label, data, color) {
     pointBorderColor: c.surface, pointBorderWidth: 2, borderJoinStyle: "round", borderCapStyle: "round", tension: 0, spanGaps: true };
 }
 
-// Weight over time on a true day axis, with fasting days as markers on the line.
+// Weight over time on a true day axis, with fasting days as a row of markers below the line.
 const dayNum = (iso) => Math.round(Date.parse(`${iso.slice(0, 10)}T00:00:00Z`) / 86400000);
 const dayLabel = (n) => new Date(n * 86400000).toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
 
-function weightAt(points, x) {
-  // Weight on day x: that day's reading, else interpolated between neighbours, else the nearest one.
-  const exact = points.find((p) => p.x === x);
-  if (exact) return exact.y;
-  const before = points.filter((p) => p.x < x).at(-1);
-  const after = points.find((p) => p.x > x);
-  if (before && after) return before.y + ((after.y - before.y) * (x - before.x)) / (after.x - before.x);
-  return (before || after).y;
-}
-
 function weightChartConfig(c, wt, fasts) {
   const pts = wt.map((m) => ({ x: dayNum(m.taken_at), y: m.weight_lb }));
+  // Markers sit in their own band under the lowest reading so the line never covers them.
+  const ys = pts.map((p) => p.y);
+  const lo = Math.min(...ys);
+  const pad = Math.max(1.5, (Math.max(...ys) - lo) * 0.12);
+  const markerY = lo - pad;
   const fastPts = fasts.map((m) => {
     const x = dayNum(m.taken_at);
-    return { x, y: Math.round(weightAt(pts, x) * 10) / 10, hours: m.hours, fasting: true };
+    return { x, y: markerY, hours: m.hours, fasting: true };
   });
   const line = lineDataset(c, "Weight (lb)", pts, c.s1);
   if (pts.length > 60) Object.assign(line, { pointRadius: 0, pointHoverRadius: 5 });
@@ -807,9 +802,12 @@ function weightChartConfig(c, wt, fasts) {
   }
   const o = baseOptions(c, { legend: fastPts.length > 0 });
   o.interaction = { mode: "nearest", axis: "x", intersect: false };
-  o.scales.x = { ...o.scales.x, type: "linear", min: Math.min(...pts.map((p) => p.x), ...fastPts.map((p) => p.x)),
-    max: Math.max(...pts.map((p) => p.x), ...fastPts.map((p) => p.x)), ticks: { ...o.scales.x.ticks, callback: dayLabel } };
+  // One day of space on each side so markers on the first/last day aren't cut in half.
+  const xs = [...pts, ...fastPts].map((p) => p.x);
+  o.scales.x = { ...o.scales.x, type: "linear", min: Math.min(...xs) - 1, max: Math.max(...xs) + 1,
+    ticks: { ...o.scales.x.ticks, callback: (v) => dayLabel(Math.round(v)) } };
   o.scales.y.beginAtZero = false;
+  if (fastPts.length) o.scales.y.min = Math.floor(markerY - pad * 0.7);
   o.plugins.tooltip.callbacks = {
     title: (items) => dayLabel(items[0].parsed.x),
     label: (ctx) => ctx.raw.fasting
@@ -889,7 +887,7 @@ function renderProgress(params) {
       ${bp.length ? chartCard("c-bp", "Blood pressure (mmHg)", null, ["Taken", "Systolic", "Diastolic", "Pulse"],
         bp.map((m) => [m.taken_at.replace("T", " "), m.systolic, m.diastolic, m.pulse ?? "–"])) :
         `<div class="card muted">No blood pressure readings in this range.</div>`}
-      ${wt.length ? chartCard("c-weight", "Body weight (lb)", fasts.length ? "Triangles mark fasting days" : null,
+      ${wt.length ? chartCard("c-weight", "Body weight (lb)", fasts.length ? "Triangles along the bottom mark fasting days" : null,
         ["Date", "Weight (lb)", "Fasting"], weightTableRows(wt, fasts)) : ""}
     </div>`;
 
