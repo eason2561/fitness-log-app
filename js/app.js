@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.02-8 (Withings)";
+const APP_VERSION = "2026.10.02-9 (Withings connect fix)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -1353,6 +1353,17 @@ async function handleOAuthReturn() {
     try { localStorage.removeItem(k); } catch {}
   }
   const service = (returned || expected || "polar").startsWith("withings") ? "Withings" : "Polar";
+  if (!gh.isConfigured()) {
+    // Usually: the Withings/Polar phone app handled the sign-in and opened this page in its own
+    // built-in browser, which doesn't have your GitHub token.
+    view.innerHTML = `<h1>Couldn't finish connecting ${service}</h1><div class="card stack">
+      <p>This page opened somewhere that doesn't have your GitHub token, most likely inside the ${service} phone
+        app's built-in browser instead of the Fitness Log app.</p>
+      <p><strong>Try this:</strong> open Fitness Log on your PC (or in Chrome on the phone, where you entered
+        your token), go to Settings and tap <strong>Connect ${service}</strong> there. If the ${service} app
+        keeps taking over on the phone, the PC is the easiest way; you only need to do this once.</p></div>`;
+    return;
+  }
   const file = service === "Withings" ? "withings-connect.yml" : "polar-connect.yml";
   const inputs = service === "Withings" ? { code, redirect_uri: appRedirectUri() } : { code };
   state.hold = true; // keep this message up even if a data refresh finishes meanwhile
@@ -1364,7 +1375,15 @@ async function handleOAuthReturn() {
       Then tap <strong>Reload data</strong> in Settings.${service === "Withings" ? " If the Connect Withings run fails because the code expired, tap Connect Withings again." : ""}
       <br><br><a class="btn" href="#/settings">Back to Settings</a>`;
   } catch (err) {
-    msg.innerHTML = `${workflowHelp(err, file, `Connect ${service}`)}<br><br>
+    if (service === "Withings") {
+      // Withings codes expire in ~30 s, so pasting by hand doesn't work; say why and retry.
+      msg.innerHTML = `Couldn't start the Connect Withings workflow: <strong>${esc(err.message)}</strong>
+        (${esc(err.status ?? "no status")}).<br><br>Withings codes expire within about 30 seconds, so fix the
+        cause and tap <strong>Connect Withings</strong> again.<br><br><a class="btn" href="#/settings">Back to Settings</a>`;
+      return;
+    }
+    msg.innerHTML = `${workflowHelp(err, file, `Connect ${service}`)}<br>
+      <span class="small muted">(${esc(err.message)})</span><br><br>
       Paste this code as the <strong>code</strong> input right away:<br>
       <input readonly value="${esc(code)}" aria-label="Authorization code">
       ${service === "Withings" ? `<br>and this as <strong>redirect_uri</strong>:<br><input readonly value="${esc(appRedirectUri())}" aria-label="Redirect URI">` : ""}
