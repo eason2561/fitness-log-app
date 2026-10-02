@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.02-4 (fasting markers below line)";
+const APP_VERSION = "2026.10.02-5 (Polar)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -43,7 +43,10 @@ const saveLocal = () => writeJSON("fitlog:local", state.local);
 function allWorkouts() {
   const byId = new Map();
   for (const w of state.bundle.workouts) if (!state.local.deleted[w.id]) byId.set(w.id, w);
-  for (const [id, w] of Object.entries(state.local.workouts)) byId.set(id, w);
+  for (const [id, w] of Object.entries(state.local.workouts)) {
+    byId.set(id, w);
+    if (w.links?.polar_exercise_id) byId.delete(`polar-${w.links.polar_exercise_id}`);
+  }
   return [...byId.values()].sort((a, b) =>
     (b.date + (b.start || "")).localeCompare(a.date + (a.start || "")));
 }
@@ -111,7 +114,7 @@ async function refresh({ quiet = false } = {}) {
   } finally {
     state.loading = false;
   }
-  if (!state.editor) route();
+  if (!state.editor && !state.hold) route();
 }
 
 // ------------------------------------------------------------------ helpers
@@ -150,12 +153,14 @@ function statLine(w) {
     if (c.distance_mi) parts.push(`${fmt(c.distance_mi, 2)} mi`);
     if (c.calories) parts.push(`${fmt(c.calories)} cal`);
   }
+  if (w.polar?.avg_hr) parts.push(`avg HR ${w.polar.avg_hr}`);
+  if (w.polar?.calories && !(w.cardio || []).some((c) => c.calories)) parts.push(`${fmt(w.polar.calories)} cal`);
   return parts.join(" · ");
 }
 
 function workoutItem(w) {
   return `<li><a href="#/workout/${encodeURIComponent(w.id)}">
-    <span><strong>${esc(w.title)}</strong> ${w.pending ? '<span class="badge">syncing</span>' : ""}<br>
+    <span><strong>${esc(w.title)}</strong> ${w.pending ? '<span class="badge">syncing</span>' : ""}${w.polar ? '<span class="badge">Polar</span>' : ""}<br>
     <span class="meta">${esc(statLine(w))}</span></span>
     <span class="meta num">${shortDate(w.date)}${w.start ? `<br>${esc(w.start)}` : ""}</span></a></li>`;
 }
@@ -213,6 +218,7 @@ function route() {
 }
 
 window.addEventListener("hashchange", () => {
+  state.hold = false;
   route();
   window.scrollTo(0, 0);
 });
@@ -262,7 +268,7 @@ function renderHome() {
 function renderNew() {
   const ws = allWorkouts();
   const seen = new Set();
-  const recent = ws.filter((w) => w.type !== "cardio" && !seen.has(w.title) && seen.add(w.title)).slice(0, 3);
+  const recent = ws.filter((w) => w.type !== "cardio" && w.source !== "polar" && !seen.has(w.title) && seen.add(w.title)).slice(0, 3);
   view.innerHTML = `
     ${setupNotice()}
     <h1>Log a workout</h1>
@@ -342,6 +348,13 @@ async function renderEditor(params) {
       const t = state.bundle.templates.find((x) => x.id === params.tpl);
       if (!t) throw new Error(`Template ${params.tpl} not found`);
       draft = { date: localIsoDate(), start: nowTime(), ...structuredClone(t.workout), template: t.id };
+    } else if (params.polar) {
+      const p = allWorkouts().find((x) => x.polar?.polar_id === params.polar);
+      if (!p) throw new Error("That Polar session isn't loaded yet. Reload data and try again.");
+      draft = { date: p.date, start: p.start, type: p.type === "cardio" ? "cardio" : "kettlebell", title: "",
+        links: { polar_exercise_id: params.polar },
+        blocks: [newBlock(p.type === "cardio" ? "cardio" : "interval")] };
+      if (/WALK|HIK/.test(p.polar.sport || "")) draft.blocks[0].machine = "outdoor_walk";
     } else if (params.photo) {
       draft = { date: params.date || localIsoDate(), start: params.start || nowTime(), type: "cardio", title: "Cardio",
         source: "life_fitness_photo", links: { photo: params.photo }, blocks: [newBlock("cardio")] };
@@ -439,6 +452,7 @@ function drawEditor() {
     </div>
     <div class="card"><label>Notes<textarea data-path="notes" placeholder="How did it feel?">${esc(d.notes || "")}</textarea></label></div>
     ${d.links?.photo ? `<p class="small muted">Linked photo: ${esc(d.links.photo)}</p>` : ""}
+    ${d.links?.polar_exercise_id ? `<p class="small muted">Linked to Polar session ${esc(d.links.polar_exercise_id)}: its heart rate and calories will show with this workout.</p>` : ""}
     <div class="summary-bar"><div class="stats" id="live-summary"></div>
       <div class="row">${origin.path ? `<a class="btn" href="#/workout/${encodeURIComponent(origin.path.split("/").pop().replace(".yaml", ""))}">Cancel</a>` : ""}
       <button class="primary" data-action="save">Save</button></div></div>
@@ -648,6 +662,24 @@ function renderWorkout(_params, [id]) {
   const cardio = (w.cardio || []).map((c) => `<div class="card"><h3>${esc((c.machine || "cardio").replace(/_/g, " "))}</h3>
       <table>${Object.entries(c).filter(([k]) => k !== "machine" && k !== "metrics").map(([k, v]) =>
         `<tr><th>${esc(k.replace(/_/g, " "))}</th><td class="r">${esc(v)}</td></tr>`).join("")}</table></div>`).join("");
+  const pl = w.polar;
+  const polarRows = pl ? [["Sport", (pl.detailed_sport || pl.sport || "").replace(/_/g, " ").toLowerCase()],
+    ["Duration", pl.duration_min != null ? `${fmt(pl.duration_min, 1)} min` : null],
+    ["Avg heart rate", pl.avg_hr], ["Max heart rate", pl.max_hr], ["Calories", pl.calories != null ? fmt(pl.calories) : null],
+    ["Training load", pl.training_load != null ? fmt(pl.training_load, 1) : null],
+    ["Distance", pl.distance_mi != null ? `${fmt(pl.distance_mi, 2)} mi` : null], ["Device", pl.device]]
+    .filter(([, v]) => v != null && v !== "") : [];
+  const polarCard = pl ? `<h2>Polar</h2><div class="card"><table>${polarRows.map(([k, v]) =>
+    `<tr><th>${esc(k)}</th><td class="r">${esc(v)}</td></tr>`).join("")}</table></div>` : "";
+  if (w.source === "polar") {
+    view.innerHTML = `
+      <h1>${esc(w.title)} <span class="badge">Polar</span></h1>
+      <p class="secondary">${longDate(w.date)}${w.start ? ` · ${esc(w.start)}` : ""}</p>
+      ${polarCard}
+      <p class="small muted">Recorded on your Polar watch. Add the sets or machine numbers and they'll be saved together with this session.</p>
+      <div class="row"><a class="btn primary" href="#/edit?polar=${encodeURIComponent(pl.polar_id)}">Add workout details</a></div>`;
+    return;
+  }
   view.innerHTML = `
     <h1>${esc(w.title)} ${w.pending ? '<span class="badge">syncing</span>' : ""}</h1>
     <p class="secondary">${longDate(w.date)}${w.start ? ` · ${esc(w.start)}` : ""}${w.rpe ? ` · RPE ${esc(w.rpe)}` : ""}</p>
@@ -660,6 +692,7 @@ function renderWorkout(_params, [id]) {
     ${exRows ? `<h2>Exercises</h2><div class="card table-wrap"><table><thead><tr><th>Exercise</th><th class="r">Reps</th>
       <th class="r">Heaviest (lb)</th><th class="r">Volume (lb)</th></tr></thead><tbody>${exRows}</tbody></table></div>` : ""}
     ${cardio}
+    ${polarCard}
     ${w.notes ? `<h2>Notes</h2><div class="card">${esc(w.notes)}</div>` : ""}
     <div class="row">
       <a class="btn" href="#/edit?id=${encodeURIComponent(w.id)}">Edit</a>
@@ -1073,6 +1106,18 @@ async function renderSettings() {
         <button type="button" id="s-refresh">Reload data</button></div>
       <p id="s-status" class="small"></p>
     </form>
+    <h2>Polar Flow</h2>
+    <div class="card stack">
+      ${polarStatus()}
+      <label>Polar client ID<input id="polar-client" value="${esc(s.polarClientId || "")}" autocapitalize="off" placeholder="from admin.polaraccesslink.com"></label>
+      <div class="row">
+        <button type="button" id="polar-connect">${polarSessions().length ? "Reconnect Polar" : "Connect Polar"}</button>
+        <button type="button" id="polar-sync">Sync Polar now</button>
+      </div>
+      <p class="field-hint">Syncs run automatically every day. The buttons need your access token to also have
+        <strong>Actions: Read and write</strong>.</p>
+      <p id="polar-status" class="small"></p>
+    </div>
     <h2>Waiting to sync</h2>
     <div class="card">${ops.length ? `<ul class="list">${ops.map((o) => `<li><div class="item"><span>${esc(o.message)}<br>
         <span class="meta">${esc(o.path)}</span>${o.error ? `<br><span class="small notice error">${esc(o.error)}</span>` : ""}</span>
@@ -1089,7 +1134,8 @@ async function renderSettings() {
   document.getElementById("s-form").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
-    gh.saveSettings({ owner: f.get("owner").trim(), repo: f.get("repo").trim(), branch: f.get("branch").trim(), token: f.get("token").trim() });
+    gh.saveSettings({ ...gh.loadSettings(), owner: f.get("owner").trim(), repo: f.get("repo").trim(),
+      branch: f.get("branch").trim(), token: f.get("token").trim() });
     status.textContent = "Testing…";
     try {
       const info = await gh.repoInfo();
@@ -1101,6 +1147,28 @@ async function renderSettings() {
     } catch (err) {
       status.textContent = err.message;
       status.className = "small notice error";
+    }
+  };
+  const pStatus = document.getElementById("polar-status");
+  document.getElementById("polar-connect").onclick = () => {
+    const clientId = document.getElementById("polar-client").value.trim();
+    if (!clientId) return toast("Enter your Polar client ID first.");
+    gh.saveSettings({ ...gh.loadSettings(), polarClientId: clientId });
+    const stateTag = `polar-${Math.random().toString(36).slice(2, 10)}`;
+    sessionStorage.setItem("fitlog:polarState", stateTag);
+    try { localStorage.setItem("fitlog:polarState", stateTag); } catch {}
+    location.href = `https://flow.polar.com/oauth2/authorization?response_type=code&client_id=${encodeURIComponent(clientId)}&state=${stateTag}`;
+  };
+  document.getElementById("polar-sync").onclick = async (e) => {
+    e.target.disabled = true;
+    pStatus.textContent = "Starting sync…";
+    try {
+      await gh.dispatchWorkflow("polar-sync.yml");
+      pStatus.textContent = "Sync started. New sessions appear in about a minute (use Reload data).";
+    } catch (err) {
+      pStatus.innerHTML = workflowHelp(err, "polar-sync.yml", "Sync Polar");
+    } finally {
+      e.target.disabled = false;
     }
   };
   document.getElementById("s-refresh").onclick = () => refresh().then(() => toast("Data reloaded."));
@@ -1120,9 +1188,60 @@ async function renderSettings() {
   };
 }
 
+// ------------------------------------------------------------------ Polar connection
+
+function polarSessions() {
+  return state.bundle.workouts.filter((w) => w.polar);
+}
+
+function polarStatus() {
+  const ps = polarSessions();
+  if (!ps.length) return `<p class="small secondary">Not connected yet, or no sessions synced.</p>`;
+  const last = ps.map((w) => w.date).sort().at(-1);
+  return `<p class="small secondary">${ps.length} Polar session${ps.length === 1 ? "" : "s"} synced · latest ${esc(shortDate(last))}</p>`;
+}
+
+function workflowHelp(err, file, name) {
+  const s = gh.loadSettings();
+  const url = `https://github.com/${encodeURIComponent(s.owner)}/${encodeURIComponent(s.repo)}/actions/workflows/${file}`;
+  const why = err.status === 403 || err.status === 404
+    ? "Your access token can't start workflows (it needs Actions: Read and write)."
+    : esc(err.message);
+  return `${why} You can run it on GitHub instead: <a href="${esc(url)}" target="_blank" rel="noopener">Actions → ${esc(name)} → Run workflow</a>.`;
+}
+
+// Polar sends you back here as ?code=…&state=… after you approve access.
+async function handlePolarReturn() {
+  const q = new URLSearchParams(location.search);
+  const code = q.get("code");
+  if (!code) return;
+  const expected = sessionStorage.getItem("fitlog:polarState") ||
+    (() => { try { return localStorage.getItem("fitlog:polarState"); } catch { return null; } })();
+  history.replaceState(null, "", location.pathname + "#/settings");
+  if (q.get("state") && expected && q.get("state") !== expected) {
+    toast("Ignored a Polar sign-in that this device didn't start.", 6000);
+    return;
+  }
+  sessionStorage.removeItem("fitlog:polarState");
+  try { localStorage.removeItem("fitlog:polarState"); } catch {}
+  state.hold = true; // keep this message up even if a data refresh finishes meanwhile
+  view.innerHTML = `<h1>Connecting Polar…</h1><div class="card"><p id="pc-msg">Starting the Connect Polar workflow…</p></div>`;
+  const msg = document.getElementById("pc-msg");
+  try {
+    await gh.dispatchWorkflow("polar-connect.yml", { code });
+    msg.innerHTML = `Polar access approved. GitHub is finishing the connection and pulling your recent sessions; this takes about a minute.
+      Then tap <strong>Reload data</strong> in Settings.<br><br><a class="btn" href="#/settings">Back to Settings</a>`;
+  } catch (err) {
+    msg.innerHTML = `${workflowHelp(err, "polar-connect.yml", "Connect Polar")}<br><br>
+      Paste this code as the <strong>code</strong> input within 10 minutes:<br>
+      <input readonly value="${esc(code)}" aria-label="Polar authorization code"><br><br><a class="btn" href="#/settings">Back to Settings</a>`;
+  }
+}
+
 // ------------------------------------------------------------------ startup
 
-route();
+if (new URLSearchParams(location.search).has("code")) handlePolarReturn();
+else route();
 refresh({ quiet: true });
 syncNow();
 window.addEventListener("online", () => syncNow().then(() => refresh({ quiet: true })));

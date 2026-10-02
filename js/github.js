@@ -107,6 +107,16 @@ export async function deleteFile(path, sha, message) {
   await call("DELETE", contentPath(path), { body: { message, sha, ...(branch ? { branch } : {}) } });
 }
 
+// Start a GitHub Actions workflow (needs the token to have Actions: Read and write).
+let defaultBranch = null;
+export async function dispatchWorkflow(file, inputs = {}) {
+  const s = loadSettings();
+  if (!s.branch && !defaultBranch) defaultBranch = (await repoInfo()).default_branch;
+  await call("POST", `/actions/workflows/${encodeURIComponent(file)}/dispatches`, {
+    body: { ref: s.branch || defaultBranch, inputs },
+  });
+}
+
 export async function listDir(path) {
   try {
     return await call("GET", contentPath(path), { query: refQuery() });
