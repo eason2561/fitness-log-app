@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.02-5 (Polar)";
+const APP_VERSION = "2026.10.02-6 (Polar history)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -667,7 +667,7 @@ function renderWorkout(_params, [id]) {
     ["Duration", pl.duration_min != null ? `${fmt(pl.duration_min, 1)} min` : null],
     ["Avg heart rate", pl.avg_hr], ["Max heart rate", pl.max_hr], ["Calories", pl.calories != null ? fmt(pl.calories) : null],
     ["Training load", pl.training_load != null ? fmt(pl.training_load, 1) : null],
-    ["Distance", pl.distance_mi != null ? `${fmt(pl.distance_mi, 2)} mi` : null], ["Device", pl.device]]
+    ["Distance", pl.distance_mi != null ? `${fmt(pl.distance_mi, 2)} mi` : null], ["Note", pl.note], ["Device", pl.device]]
     .filter(([, v]) => v != null && v !== "") : [];
   const polarCard = pl ? `<h2>Polar</h2><div class="card"><table>${polarRows.map(([k, v]) =>
     `<tr><th>${esc(k)}</th><td class="r">${esc(v)}</td></tr>`).join("")}</table></div>` : "";
