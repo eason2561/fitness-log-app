@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.03-3 (BP morning/evening)";
+const APP_VERSION = "2026.10.03-4 (BP date axis)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -988,6 +988,36 @@ function bpSplitConfig(c, sessions) {
   return { type: "line", data: { datasets }, options: o };
 }
 
+// Every reading at its actual date and time (x = days, with the time of day as the fraction).
+function bpAllConfig(c, bp) {
+  const when = (m) => dayNum(m.taken_at) + (Number(m.taken_at.slice(11, 13)) * 60 + Number(m.taken_at.slice(14, 16))) / 1440;
+  const series = (key, color, label) => {
+    const pts = [];
+    for (const m of bp) {
+      const x = when(m);
+      if (pts.length && x - pts.at(-1).x > 7) pts.push({ x: x - 1, y: null }); // no line across gaps of over a week
+      pts.push({ x, y: m[key], m });
+    }
+    const line = { ...lineDataset(c, label, pts, color), spanGaps: false };
+    if (bp.length > 60) Object.assign(line, { pointRadius: 0, pointHoverRadius: 5 });
+    return line;
+  };
+  const o = baseOptions(c, { legend: true });
+  o.interaction = { mode: "nearest", axis: "x", intersect: false };
+  const xs = bp.map(when);
+  o.scales.x = { ...o.scales.x, type: "linear", min: Math.floor(Math.min(...xs)) - 1, max: Math.ceil(Math.max(...xs)) + 1,
+    ticks: { ...o.scales.x.ticks, callback: (v) => (Number.isInteger(v) ? dayLabel(v) : "") } };
+  o.scales.y.beginAtZero = false;
+  o.plugins.tooltip.callbacks = {
+    title: (items) => {
+      const m = items[0].raw.m;
+      return `${dayLabel(dayNum(m.taken_at))} ${m.taken_at.slice(11, 16)}`;
+    },
+    label: (ctx) => `${ctx.dataset.label} ${ctx.parsed.y}${ctx.dataset.label === "Diastolic" && ctx.raw.m.pulse ? ` · pulse ${ctx.raw.m.pulse}` : ""}`,
+  };
+  return { type: "line", data: { datasets: [series("systolic", c.s1, "Systolic"), series("diastolic", c.s2, "Diastolic")] }, options: o };
+}
+
 function bpSplitTiles(sessions) {
   const tile = (period, label) => {
     const list = sessions.filter((s) => s.period === period);
@@ -1099,13 +1129,7 @@ function renderProgress(params) {
     addChart("c-ex-reps", barConfig(c, exLabels, exSessions.map((w) => w.exercises[ex].total_reps), "Reps"));
   }
   if (bp.length && bpView === "split") addChart("c-bp", bpSplitConfig(c, sessions));
-  else if (bp.length) {
-    const o = baseOptions(c, { legend: true });
-    o.scales.y.beginAtZero = false;
-    addChart("c-bp", { type: "line", data: { labels: bp.map((m) => shortDate(m.taken_at.slice(0, 10))),
-      datasets: [lineDataset(c, "Systolic", bp.map((m) => m.systolic), c.s1), lineDataset(c, "Diastolic", bp.map((m) => m.diastolic), c.s2)] },
-      options: o });
-  }
+  else if (bp.length) addChart("c-bp", bpAllConfig(c, bp));
   if (wt.length) addChart("c-weight", weightChartConfig(c, wt, fasts));
   for (const [id, rows, key, label] of [["c-fat", fat, "body_fat_pct", "Body fat (%)"], ["c-muscle", muscle, "muscle_mass_lb", "Muscle mass (lb)"]]) {
     if (!rows.length) continue;
