@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.03-4 (BP date axis)";
+const APP_VERSION = "2026.10.03-5 (Google Photos import)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -251,13 +251,13 @@ function renderHome() {
     </div>
     <div class="big-actions">
       <a class="btn primary" href="#/new">Log workout</a>
-      <a class="btn" href="#/photo">Life Fitness photo</a>
+      <a class="btn" href="#/photo">Machine photo</a>
       <a class="btn" href="#/measure">BP / weight / fasting</a>
     </div>
     ${bp ? `<div class="card spread"><span><span class="secondary small">Latest blood pressure</span><br>
       <strong class="num">${bp.systolic}/${bp.diastolic}</strong>${bp.pulse ? ` <span class="muted">· pulse ${bp.pulse}</span>` : ""}</span>
       <span class="meta">${esc(bp.taken_at.replace("T", " "))}</span></div>` : ""}
-    ${photos.length ? `<div class="notice">${photos.length} Life Fitness photo${photos.length === 1 ? "" : "s"} waiting to be read
+    ${photos.length ? `<div class="notice">${photos.length} machine photo${photos.length === 1 ? "" : "s"} waiting to be read
       or needing a look (History → Photos).</div>` : ""}
     <h2>Recent workouts</h2>
     <div class="card">${ws.length ? `<ul class="list">${ws.slice(0, 6).map(workoutItem).join("")}</ul>` :
@@ -295,7 +295,8 @@ view.addEventListener("click", (e) => {
 
 const DRAFT_KEY = "fitlog:draft";
 const EVERY_OPTIONS = [30, 45, 60, 90, 120, 150, 180, 240, 300];
-const MACHINES = ["treadmill", "elliptical", "upright_bike", "recumbent_bike", "stair_climber", "rower", "outdoor_walk", "other"];
+const MACHINES = ["treadmill", "elliptical", "upright_bike", "recumbent_bike", "stair_climber", "rower", "bike_erg", "outdoor_walk", "other"];
+const machineName = (m) => ({ bike_erg: "BikeErg" })[m] || m.replace(/_/g, " ");
 const CARDIO_FIELDS = [
   ["duration_min", "Duration (min)", "float"], ["distance_mi", "Distance (mi)", "float"],
   ["calories", "Calories", "float"], ["avg_hr", "Avg heart rate", "int"], ["max_hr", "Max heart rate", "int"],
@@ -358,7 +359,7 @@ async function renderEditor(params) {
       if (/WALK|HIK/.test(p.polar.sport || "")) draft.blocks[0].machine = "outdoor_walk";
     } else if (params.photo) {
       draft = { date: params.date || localIsoDate(), start: params.start || nowTime(), type: "cardio", title: "Cardio",
-        source: "life_fitness_photo", links: { photo: params.photo }, blocks: [newBlock("cardio")] };
+        source: "machine_photo", links: { photo: params.photo }, blocks: [newBlock("cardio")] };
     } else {
       draft = { date: localIsoDate(), start: nowTime(), type: "kettlebell", blocks: [newBlock("interval")] };
     }
@@ -426,7 +427,7 @@ function drawEditor() {
         <button class="ghost" data-action="add-set" data-i="${i}">+ Add set</button></div>`;
     }
     return `<div class="card block">${head("Cardio")}
-      <label>Machine<select data-path="blocks.${i}.machine">${[...new Set([...MACHINES, b.machine])].map((m) => opt(m, b.machine, m.replace(/_/g, " "))).join("")}</select></label>
+      <label>Machine<select data-path="blocks.${i}.machine">${[...new Set([...MACHINES, b.machine])].map((m) => opt(m, b.machine, machineName(m))).join("")}</select></label>
       <div class="grid-2">${CARDIO_FIELDS.map(([k, label, t]) => `<label>${label}${num(`blocks.${i}.${k}`, b[k], t)}</label>`).join("")}</div></div>`;
   };
 
@@ -1256,7 +1257,7 @@ async function importOmron(file) {
   }
 }
 
-// ------------------------------------------------------------------ Life Fitness photo
+// ------------------------------------------------------------------ machine photos (camera or Google Photos)
 
 async function resizeImage(file, maxSide = 2000, quality = 0.85) {
   const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
@@ -1268,59 +1269,159 @@ async function resizeImage(file, maxSide = 2000, quality = 0.85) {
   return new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
 }
 
-function renderPhoto() {
-  let blob = null;
-  view.innerHTML = `${setupNotice()}<h1>Life Fitness photo</h1>
-    <p class="secondary">Take a photo of the workout summary screen when you finish. It's saved to the repo and read into a cardio workout,
-      then matched to your Polar session by time.</p>
-    <form id="p-form" class="card stack">
-      <label class="btn primary" for="p-file">Take photo</label>
-      <input id="p-file" type="file" accept="image/*" capture="environment" hidden>
-      <img id="p-preview" class="photo-preview" alt="Photo preview" hidden>
-      <div class="grid-2">
-        <label>Machine<select name="machine">${MACHINES.map((m) => `<option value="${m}">${m.replace(/_/g, " ")}</option>`).join("")}</select></label>
-        <label>Finished at<input type="datetime-local" name="captured_at" value="${nowLocal()}" required></label>
-      </div>
-      <label>Note<input name="note" placeholder="optional, e.g. hill program"></label>
-      <button class="primary" type="submit" id="p-save" disabled>Save photo</button>
-    </form>`;
-  const fileInput = document.getElementById("p-file");
-  fileInput.onchange = async () => {
-    const file = fileInput.files[0];
-    if (!file) return;
-    try {
-      blob = await resizeImage(file);
-      const img = document.getElementById("p-preview");
-      img.src = URL.createObjectURL(blob);
-      img.hidden = false;
-      document.getElementById("p-save").disabled = false;
-    } catch (e) {
-      toast(`Couldn't read that image: ${e.message}`);
+// When a JPEG was taken, from its EXIF DateTimeOriginal (local camera time), as "YYYY-MM-DDTHH:MM"; null if absent.
+async function exifTakenAt(file) {
+  try {
+    const v = new DataView(await file.slice(0, 256 * 1024).arrayBuffer());
+    if (v.getUint16(0) !== 0xffd8) return null;
+    let o = 2;
+    while (o + 4 < v.byteLength) {
+      const marker = v.getUint16(o), len = v.getUint16(o + 2);
+      if (marker === 0xffe1 && v.getUint32(o + 4) === 0x45786966) { // "Exif"
+        const t = o + 10, le = v.getUint16(t) === 0x4949;
+        const u16 = (p) => v.getUint16(t + p, le), u32 = (p) => v.getUint32(t + p, le);
+        const tags = (ifd) => {
+          const out = {};
+          for (let i = 0, n = u16(ifd); i < n; i++) {
+            const e = ifd + 2 + i * 12;
+            out[u16(e)] = { type: u16(e + 2), count: u32(e + 4), at: e + 8 };
+          }
+          return out;
+        };
+        const text = (tag) => {
+          if (!tag || tag.type !== 2) return null;
+          const p = tag.count > 4 ? u32(tag.at) : tag.at;
+          return String.fromCharCode(...new Uint8Array(v.buffer, t + p, Math.min(tag.count, 19)));
+        };
+        const ifd0 = tags(u32(4));
+        const exif = ifd0[0x8769] ? tags(u32(ifd0[0x8769].at)) : {};
+        const raw = text(exif[0x9003]) || text(exif[0x9004]) || text(ifd0[0x0132]); // "2026:10:02 08:41:07"
+        const m = raw && raw.match(/^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2})/);
+        return m && m[1] !== "0000" ? `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}` : null;
+      }
+      if ((marker & 0xff00) !== 0xff00 || marker === 0xffda) return null;
+      o += 2 + len;
     }
+  } catch {}
+  return null;
+}
+
+async function sha256Hex(file) {
+  try {
+    const d = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+    return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch { return null; }
+}
+
+function localStamp(ms) {
+  const d = new Date(ms);
+  return `${localIsoDate(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function renderPhoto() {
+  const items = []; // { blob, url, at, timeFrom, machine, note, hash, origin }
+  let lastMachine = readJSON("fitlog:photoMachine", "treadmill");
+  view.innerHTML = `${setupNotice()}<h1>Machine photo</h1>
+    <p class="secondary">A photo of the workout summary on a Life Fitness console or the BikeErg monitor. It's saved to the
+      repo, read into a cardio workout, and matched to your Polar session by time.</p>
+    <div class="card stack">
+      <div class="big-actions">
+        <label class="btn primary" for="p-camera">Take photo</label>
+        <label class="btn" for="p-gallery">Choose from Google Photos</label>
+      </div>
+      <input id="p-camera" type="file" accept="image/*" capture="environment" hidden>
+      <input id="p-gallery" type="file" accept="image/*" multiple hidden>
+      <p class="small muted">Choosing from Google Photos: pick one or more summary photos. The finish time comes from when each
+        photo was taken; check it before saving.</p>
+    </div>
+    <form id="p-form" class="stack">
+      <div id="p-items" class="stack"></div>
+      <button class="primary" type="submit" id="p-save" hidden>Save</button>
+    </form>`;
+  const list = document.getElementById("p-items");
+  const saveBtn = document.getElementById("p-save");
+
+  const draw = () => {
+    list.innerHTML = items.map((it, i) => `<div class="card photo-item">
+      <img src="${it.url}" alt="Photo ${i + 1}">
+      <div><strong>Photo ${i + 1}</strong>
+        <p class="small ${it.timeFrom === "photo" ? "muted" : "warn-text"}">${it.timeFrom === "photo" ? "Time from the photo."
+          : it.timeFrom === "camera" ? "Time now." : "The photo has no date; set the time you finished."}</p></div>
+      <div class="stack wide">
+        <div class="grid-2">
+          <label>Machine<select data-i="${i}" data-k="machine">${MACHINES.map((m) =>
+            `<option value="${m}" ${m === it.machine ? "selected" : ""}>${machineName(m)}</option>`).join("")}</select></label>
+          <label>Finished at<input type="datetime-local" data-i="${i}" data-k="at" value="${esc(it.at)}" required></label>
+        </div>
+        <label>Note<input data-i="${i}" data-k="note" value="${esc(it.note)}" placeholder="optional, e.g. hill program"></label>
+        <button type="button" class="ghost" data-remove="${i}">Remove</button>
+      </div></div>`).join("");
+    saveBtn.hidden = !items.length;
+    saveBtn.textContent = items.length > 1 ? `Save ${items.length} photos` : "Save photo";
+    list.querySelectorAll("[data-k]").forEach((el) => {
+      el.oninput = el.onchange = () => {
+        items[el.dataset.i][el.dataset.k] = el.value;
+        if (el.dataset.k === "machine") writeJSON("fitlog:photoMachine", (lastMachine = el.value));
+      };
+    });
+    list.querySelectorAll("[data-remove]").forEach((b) => (b.onclick = () => {
+      URL.revokeObjectURL(items[b.dataset.remove].url);
+      items.splice(Number(b.dataset.remove), 1);
+      draw();
+    }));
   };
+
+  const add = async (files, origin) => {
+    for (const file of files) {
+      try {
+        const [blob, taken, hash] = await Promise.all([resizeImage(file), origin === "camera" ? null : exifTakenAt(file), sha256Hex(file)]);
+        let at = taken, timeFrom = "photo";
+        if (origin === "camera") { at = nowLocal(); timeFrom = "camera"; }
+        else if (!at) { at = localStamp(file.lastModified || Date.now()); timeFrom = "unknown"; }
+        if (hash && items.some((x) => x.hash === hash)) continue;
+        items.push({ blob, url: URL.createObjectURL(blob), at, timeFrom, machine: lastMachine, note: "", hash, origin });
+      } catch (e) {
+        toast(`Couldn't read ${file.name || "that image"}: ${e.message}`);
+      }
+    }
+    items.sort((a, b) => a.at.localeCompare(b.at));
+    draw();
+  };
+  for (const [id, origin] of [["p-camera", "camera"], ["p-gallery", "google_photos"]]) {
+    const input = document.getElementById(id);
+    input.onchange = async () => { await add([...input.files], origin); input.value = ""; };
+  }
+
   document.getElementById("p-form").onsubmit = async (e) => {
     e.preventDefault();
-    if (!blob) return;
-    const f = new FormData(e.target);
-    const at = f.get("captured_at");
-    const stem = `${at.slice(0, 10)}-${at.slice(11, 16).replace(":", "")}-lifefitness-${randomTag()}`;
-    const dir = `data/inbox/photos/${stem.slice(0, 4)}`;
-    const meta = { captured_at: at, source: "life_fitness", machine: f.get("machine"), status: "pending" };
-    if (f.get("note")) meta.note = String(f.get("note")).trim();
-    const btn = document.getElementById("p-save");
-    btn.disabled = true;
-    btn.textContent = "Saving…";
+    if (!items.length) return;
+    if (items.some((it) => !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(it.at))) return toast("Set the finish time for every photo.");
+    saveBtn.disabled = true;
+    let queuedAny = false;
     try {
-      const b64 = gh.bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
-      const { queued } = await outbox.perform([
-        { op: "put", path: `${dir}/${stem}.jpg`, content: b64, message: `Add Life Fitness photo ${at} (app)` },
-        { op: "put", path: `${dir}/${stem}.yaml`, content: gh.textToBase64(yaml.dump(meta)), message: `Add photo details ${at} (app)` },
-      ]);
-      toast(queued ? "Photo saved on this device; will upload when online." : "Photo saved to GitHub.");
+      while (items.length) {
+        const it = items[0];
+        saveBtn.textContent = `Saving… (${items.length} left)`;
+        const at = it.at.slice(0, 16);
+        const stem = `${at.slice(0, 10)}-${at.slice(11, 16).replace(":", "")}-${it.machine.replace(/_/g, "")}-${randomTag()}`;
+        const dir = `data/inbox/photos/${stem.slice(0, 4)}`;
+        const meta = { captured_at: at, source: "machine_photo", origin: it.origin, machine: it.machine, status: "pending" };
+        if (it.hash) meta.original_sha256 = it.hash;
+        if (it.note.trim()) meta.note = it.note.trim();
+        const b64 = gh.bytesToBase64(new Uint8Array(await it.blob.arrayBuffer()));
+        const { queued } = await outbox.perform([
+          { op: "put", path: `${dir}/${stem}.jpg`, content: b64, message: `Add ${machineName(it.machine)} photo ${at} (app)` },
+          { op: "put", path: `${dir}/${stem}.yaml`, content: gh.textToBase64(yaml.dump(meta)), message: `Add photo details ${at} (app)` },
+        ]);
+        queuedAny ||= queued;
+        URL.revokeObjectURL(it.url);
+        items.shift();
+      }
+      toast(queuedAny ? "Saved on this device; will upload when online." : "Saved to GitHub. Reading takes a few minutes.");
       location.hash = "#/";
     } catch (err) {
-      btn.disabled = false;
-      btn.textContent = "Save photo";
+      draw();
+      saveBtn.disabled = false;
       toast(err.message);
     }
   };

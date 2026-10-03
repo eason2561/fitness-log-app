@@ -199,6 +199,12 @@ details summary { cursor: pointer; color: var(--accent); font-size: 0.85rem; mar
 
 .notice { background: var(--surface-2); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; font-size: 0.9rem; }
 .notice.error { color: var(--danger); }
+.photo-item { display: grid; grid-template-columns: 88px 1fr; gap: 12px; align-items: start; }
+.photo-item .wide { grid-column: 1 / -1; }
+.photo-item .grid-2 > label, .photo-item input, .photo-item select { min-width: 0; }
+.photo-item img { width: 88px; height: 88px; object-fit: cover; border-radius: 8px; }
+.warn-text { color: var(--danger); font-weight: 600; }
+.photo-item button.ghost { justify-self: start; padding-left: 0; }
 .photo-preview { max-width: 100%; max-height: 50vh; border-radius: var(--radius); display: block; margin: 8px 0; }
 
 #toast {
