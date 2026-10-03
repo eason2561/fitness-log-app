@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.03-2 (Omron import)";
+const APP_VERSION = "2026.10.03-3 (BP morning/evening)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -919,8 +919,89 @@ function weightTableRows(wt, fasts) {
   return [...rows.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([d, r]) => [d, r.w, r.f]);
 }
 
+// Morning = 03:00–11:59. Evening = 12:00–02:59; a reading after midnight counts toward the evening before.
+function bpPeriod(m) {
+  const h = Number(m.taken_at.slice(11, 13));
+  if (h >= 3 && h < 12) return { period: "morning", day: m.taken_at.slice(0, 10) };
+  if (h >= 12) return { period: "evening", day: m.taken_at.slice(0, 10) };
+  const d = new Date(`${m.taken_at.slice(0, 10)}T12:00:00`);
+  d.setDate(d.getDate() - 1);
+  return { period: "evening", day: localIsoDate(d) };
+}
+
+// One averaged reading per day and period (several readings in a sitting count as one session).
+function bpSessions(bp) {
+  const groups = new Map();
+  for (const m of bp) {
+    const { period, day } = bpPeriod(m);
+    const k = `${day} ${period}`;
+    if (!groups.has(k)) groups.set(k, { day, period, list: [] });
+    groups.get(k).list.push(m);
+  }
+  const avg = (list, key) => {
+    const v = list.map((m) => m[key]).filter((x) => x != null);
+    return v.length ? Math.round(v.reduce((a, b) => a + b, 0) / v.length) : null;
+  };
+  return [...groups.values()].sort((a, b) => a.day.localeCompare(b.day) || a.period.localeCompare(b.period) * -1)
+    .map((g) => ({ day: g.day, period: g.period, n: g.list.length,
+      systolic: avg(g.list, "systolic"), diastolic: avg(g.list, "diastolic"), pulse: avg(g.list, "pulse") }));
+}
+
+function bpSplitConfig(c, sessions) {
+  const ds = (period, key, color, label) => {
+    const pts = [];
+    for (const s of sessions.filter((x) => x.period === period)) {
+      const x = dayNum(s.day);
+      if (pts.length && x - pts.at(-1).x > 7) pts.push({ x: x - 1, y: null }); // no line across gaps of over a week
+      pts.push({ x, y: s[key], s });
+    }
+    const line = { ...lineDataset(c, label, pts, color), spanGaps: false };
+    if (key === "diastolic") line.pointStyle = "rect";
+    return line;
+  };
+  const datasets = [ds("morning", "systolic", c.s1, "Morning"), ds("morning", "diastolic", c.s1, "Morning diastolic"),
+    ds("evening", "systolic", c.s2, "Evening"), ds("evening", "diastolic", c.s2, "Evening diastolic")];
+  if (sessions.length > 60) datasets.forEach((d) => Object.assign(d, { pointRadius: 0, pointHoverRadius: 5 }));
+  const o = baseOptions(c, { legend: true });
+  o.plugins.legend.labels = { ...o.plugins.legend.labels, filter: (item) => !item.text.includes("diastolic") };
+  // Clicking a legend entry hides that period's systolic and diastolic lines together.
+  o.plugins.legend.onClick = (e, item, legend) => {
+    const chart = legend.chart;
+    const hide = chart.isDatasetVisible(item.datasetIndex);
+    [item.datasetIndex, item.datasetIndex + 1].forEach((i) => chart.setDatasetVisibility(i, !hide));
+    chart.update();
+  };
+  o.interaction = { mode: "nearest", axis: "x", intersect: false };
+  const xs = sessions.map((s) => dayNum(s.day));
+  o.scales.x = { ...o.scales.x, type: "linear", min: Math.min(...xs) - 1, max: Math.max(...xs) + 1,
+    ticks: { ...o.scales.x.ticks, callback: (v) => dayLabel(Math.round(v)) } };
+  o.scales.y.beginAtZero = false;
+  o.plugins.tooltip.callbacks = {
+    title: (items) => dayLabel(items[0].parsed.x),
+    label: (ctx) => {
+      const s = ctx.raw.s;
+      if (ctx.dataset.label.includes("diastolic")) return null;
+      return `${s.period === "morning" ? "Morning" : "Evening"} ${s.systolic}/${s.diastolic}${s.pulse ? ` · pulse ${s.pulse}` : ""}${s.n > 1 ? ` (avg of ${s.n})` : ""}`;
+    },
+  };
+  o.plugins.tooltip.filter = (item) => !item.dataset.label.includes("diastolic");
+  return { type: "line", data: { datasets }, options: o };
+}
+
+function bpSplitTiles(sessions) {
+  const tile = (period, label) => {
+    const list = sessions.filter((s) => s.period === period);
+    if (!list.length) return `<div class="tile"><div class="label">${label}</div><div class="value">–</div><div class="delta">No readings</div></div>`;
+    const mean = (key) => Math.round(list.reduce((a, s) => a + s[key], 0) / list.length);
+    return `<div class="tile"><div class="label">${label} average</div><div class="value num">${mean("systolic")}/${mean("diastolic")}</div>
+      <div class="delta">${list.length} day${list.length === 1 ? "" : "s"}</div></div>`;
+  };
+  return `<div class="tiles-2">${tile("morning", "Morning")}${tile("evening", "Evening")}</div>`;
+}
+
 function renderProgress(params) {
   const range = params.range || "12";
+  const bpView = params.bp === "split" ? "split" : "all";
   const ws = allWorkouts();
   const c = themeColors();
 
@@ -955,7 +1036,21 @@ function renderProgress(params) {
   const fat = wt.filter((m) => m.body_fat_pct != null);
   const muscle = wt.filter((m) => m.muscle_mass_lb != null);
 
-  const rangeBtn = (r, label) => `<button data-go="#/progress?range=${r}${ex ? `&ex=${encodeURIComponent(ex)}` : ""}" aria-pressed="${range === r}">${label}</button>`;
+  const progressHash = (o = {}) => {
+    const q = { range, ex, bp: bpView, ...o };
+    return `#/progress?range=${q.range}${q.ex ? `&ex=${encodeURIComponent(q.ex)}` : ""}${q.bp === "split" ? "&bp=split" : ""}`;
+  };
+  const rangeBtn = (r, label) => `<button data-go="${progressHash({ range: r })}" aria-pressed="${range === r}">${label}</button>`;
+  const bpBtn = (v, label) => `<button data-go="${progressHash({ bp: v })}" aria-pressed="${bpView === v}">${label}</button>`;
+  const sessions = bpView === "split" ? bpSessions(bp) : [];
+  const bpCard = !bp.length ? `<div class="card muted">No blood pressure readings in this range.</div>`
+    : bpView === "split"
+      ? chartCard("c-bp", "Blood pressure: morning vs evening (mmHg)",
+        "Daily average per period. Morning 3 am–noon, evening noon–3 am. Upper lines systolic, lower diastolic.",
+        ["Date", "Period", "Systolic", "Diastolic", "Pulse", "Readings"],
+        sessions.map((s) => [s.day, s.period === "morning" ? "Morning" : "Evening", s.systolic, s.diastolic, s.pulse ?? "–", s.n]))
+      : chartCard("c-bp", "Blood pressure (mmHg)", null, ["Taken", "Systolic", "Diastolic", "Pulse"],
+        bp.map((m) => [m.taken_at.replace("T", " "), m.systolic, m.diastolic, m.pulse ?? "–"]));
   const wkRows = (key, d = 0) => weeks.map((w) => [`Week of ${w.week}`, fmt(w[key], d)]);
 
   view.innerHTML = `<h1>Progress</h1>
@@ -977,10 +1072,10 @@ function renderProgress(params) {
         exSessions.map((w) => [w.date, fmt(w.exercises[ex].total_reps)]))}
       </div>` : `<div class="card muted">Log a few workouts to see exercise trends.</div>`}
     <h2>Health</h2>
+    ${bp.length ? `<div class="segmented" role="group" aria-label="Blood pressure view">${bpBtn("all", "All readings")}${bpBtn("split", "Morning vs evening")}</div>
+      ${bpView === "split" ? bpSplitTiles(sessions) : ""}` : ""}
     <div class="charts">
-      ${bp.length ? chartCard("c-bp", "Blood pressure (mmHg)", null, ["Taken", "Systolic", "Diastolic", "Pulse"],
-        bp.map((m) => [m.taken_at.replace("T", " "), m.systolic, m.diastolic, m.pulse ?? "–"])) :
-        `<div class="card muted">No blood pressure readings in this range.</div>`}
+      ${bpCard}
       ${wt.length ? chartCard("c-weight", "Body weight (lb)", fasts.length ? "Triangles along the bottom mark fasting days" : null,
         ["Date", "Weight (lb)", "Fasting"], weightTableRows(wt, fasts)) : ""}
       ${fat.length ? chartCard("c-fat", "Body fat (%)", "From the Withings scale", ["Taken", "Body fat (%)"],
@@ -990,7 +1085,7 @@ function renderProgress(params) {
     </div>`;
 
   const pick = document.getElementById("ex-pick");
-  if (pick) pick.onchange = () => (location.hash = `#/progress?range=${range}&ex=${encodeURIComponent(pick.value)}`);
+  if (pick) pick.onchange = () => (location.hash = progressHash({ ex: pick.value }));
 
   addChart("c-swings", barConfig(c, labels, weeks.map((w) => w.swings), "Swings"));
   addChart("c-minutes", barConfig(c, labels, weeks.map((w) => w.minutes), "Minutes"));
@@ -1003,7 +1098,8 @@ function renderProgress(params) {
       options: { ...baseOptions(c), scales: { ...baseOptions(c).scales, y: { ...baseOptions(c).scales.y, beginAtZero: false } } } });
     addChart("c-ex-reps", barConfig(c, exLabels, exSessions.map((w) => w.exercises[ex].total_reps), "Reps"));
   }
-  if (bp.length) {
+  if (bp.length && bpView === "split") addChart("c-bp", bpSplitConfig(c, sessions));
+  else if (bp.length) {
     const o = baseOptions(c, { legend: true });
     o.scales.y.beginAtZero = false;
     addChart("c-bp", { type: "line", data: { labels: bp.map((m) => shortDate(m.taken_at.slice(0, 10))),

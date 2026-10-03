@@ -116,6 +116,7 @@ main { max-width: 960px; margin: 0 auto; padding: 16px; outline: none; }
 .stack > * + * { margin-top: 12px; }
 
 /* tiles */
+.tiles-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
 .tile { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
 .tile .label { color: var(--ink-2); font-size: 0.8rem; }
 .tile .value { font-size: 1.6rem; font-weight: 600; line-height: 1.2; }
