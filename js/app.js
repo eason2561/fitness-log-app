@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.02-9 (Withings connect fix)";
+const APP_VERSION = "2026.10.03-1 (photo reading)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -257,7 +257,8 @@ function renderHome() {
     ${bp ? `<div class="card spread"><span><span class="secondary small">Latest blood pressure</span><br>
       <strong class="num">${bp.systolic}/${bp.diastolic}</strong>${bp.pulse ? ` <span class="muted">· pulse ${bp.pulse}</span>` : ""}</span>
       <span class="meta">${esc(bp.taken_at.replace("T", " "))}</span></div>` : ""}
-    ${photos.length ? `<div class="notice">${photos.length} Life Fitness photo${photos.length === 1 ? "" : "s"} waiting to be read.</div>` : ""}
+    ${photos.length ? `<div class="notice">${photos.length} Life Fitness photo${photos.length === 1 ? "" : "s"} waiting to be read
+      or needing a look (History → Photos).</div>` : ""}
     <h2>Recent workouts</h2>
     <div class="card">${ws.length ? `<ul class="list">${ws.slice(0, 6).map(workoutItem).join("")}</ul>` :
       `<p class="muted">No workouts yet. Tap <strong>Log workout</strong> to add one.</p>`}</div>`;
@@ -806,9 +807,11 @@ function renderHistory(params) {
   } else {
     const ps = state.bundle.pending_photos || [];
     body = `<div class="card">${ps.length ? `<ul class="list">${ps.map((p) => `<li><div class="item">
-      <span>${esc((p.machine || "photo").replace(/_/g, " "))}${p.note ? ` · ${esc(p.note)}` : ""}<br><span class="meta">${esc(p.path)}</span></span>
+      <span>${esc((p.machine || "photo").replace(/_/g, " "))}${p.note ? ` · ${esc(p.note)}` : ""}
+        ${p.status === "needs_review" ? `<br><span class="small notice error">Couldn't read: ${esc(p.problem || "unknown problem")}</span>` : ""}
+        <br><span class="meta">${esc(p.path)}</span></span>
       <span class="meta">${esc(String(p.captured_at || "").replace("T", " "))}</span></div></li>`).join("")}</ul>` :
-      `<p class="muted">No photos waiting. Photos you take are read into workouts automatically once photo reading is set up.</p>`}</div>`;
+      `<p class="muted">No photos waiting. New photos are read into cardio workouts automatically within a few minutes.</p>`}</div>`;
   }
   view.innerHTML = `<h1>History</h1>
     <div class="segmented" role="group" aria-label="History type">${seg("workouts", "Workouts")}${seg("measurements", "Measurements")}${seg("photos", "Photos")}</div>
