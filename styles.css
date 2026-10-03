@@ -213,3 +213,51 @@ details summary { cursor: pointer; color: var(--accent); font-size: 0.85rem; mar
   max-width: calc(100vw - 32px);
 }
 .hr-zones-title { margin: 16px 0 4px; }
+
+/* printable report: always light, like paper */
+.paper {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-2: #f0efec;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.12);
+  --accent: #2a78d6;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  color: var(--ink);
+}
+.offscreen { position: fixed; left: -10000px; top: 0; }
+.report-controls { margin-bottom: 16px; }
+.report-controls .spread { flex-wrap: wrap; margin-top: 12px; }
+.report { background: #ffffff; border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 16px; }
+.report header h1 { margin-bottom: 2px; }
+.report h2 { font-size: 1.15rem; margin: 28px 0 10px; padding-bottom: 4px; border-bottom: 2px solid var(--ink); }
+.report h3 { margin: 18px 0 8px; }
+.report .tile { background: var(--surface-2); border: 0; }
+.report-fig { margin: 0 0 12px; }
+.report-fig img { display: block; width: 100%; height: auto; }
+.report-fig figcaption { margin-top: 4px; }
+.report table { font-size: 0.8rem; }
+.report th, .report td { padding: 4px 6px; vertical-align: top; }
+.report td:first-child, .report td.r, .report td.nw { white-space: nowrap; }
+.report tfoot th { border-top: 1px solid var(--ink-2); border-bottom: 0; color: var(--ink); }
+.report footer { margin-top: 24px; }
+
+@media print {
+  @page { margin: 14mm 12mm; }
+  body { background: #ffffff; padding: 0; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .topbar, .tabbar, #toast, .report-controls { display: none !important; }
+  main { max-width: none; padding: 0; }
+  .report { border: 0; border-radius: 0; padding: 0; }
+  .report .grid-tiles { grid-template-columns: repeat(4, 1fr) !important; }
+  .report .table-wrap { overflow: visible; }
+  .report h2, .report h3 { break-after: avoid; }
+  .report-fig, .report tr, .report .grid-tiles { break-inside: avoid; }
+  .report thead { display: table-header-group; }
+  .report tfoot { display: table-row-group; }
+}

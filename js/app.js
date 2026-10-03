@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.03-5 (Google Photos import)";
+const APP_VERSION = "2026.10.03-6 (printable report)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -107,6 +107,7 @@ async function refresh({ quiet = false } = {}) {
     writeJSON("fitlog:bundle", state.bundle);
     writeJSON("fitlog:refreshedAt", Date.now());
     catalog = new Catalog(state.bundle.exercises);
+    state.setRows = null;
     reconcile();
   } catch (e) {
     state.loadError = e.message;
@@ -199,6 +200,7 @@ const routes = {
   workout: renderWorkout,
   history: renderHistory,
   progress: renderProgress,
+  report: renderReport,
   measure: renderMeasure,
   photo: renderPhoto,
   settings: renderSettings,
@@ -211,7 +213,8 @@ function route() {
   state.charts.forEach((c) => c.destroy());
   state.charts = [];
   if (name !== "edit") state.editor = null;
-  const tab = { "": "home", workout: "history", measure: "home", photo: "home", edit: "new" }[name] ?? name;
+  document.title = "Fitness Log";
+  const tab = { "": "home", workout: "history", measure: "home", photo: "home", edit: "new", report: "progress" }[name] ?? name;
   document.querySelectorAll(".tabbar a").forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
   (routes[name] || renderHome)(params, rest.map(decodeURIComponent));
   updateSyncButton();
@@ -821,8 +824,8 @@ function renderHistory(params) {
 
 // ------------------------------------------------------------------ progress (charts)
 
-function themeColors() {
-  const cs = getComputedStyle(document.documentElement);
+function themeColors(el = document.documentElement) {
+  const cs = getComputedStyle(el);
   const v = (n) => cs.getPropertyValue(n).trim();
   return { s1: v("--series-1"), s2: v("--series-2"), grid: v("--grid"), axis: v("--axis"), muted: v("--muted"),
     ink2: v("--ink-2"), surface: v("--surface"), ink: v("--ink") };
@@ -1084,7 +1087,8 @@ function renderProgress(params) {
         bp.map((m) => [m.taken_at.replace("T", " "), m.systolic, m.diastolic, m.pulse ?? "–"]));
   const wkRows = (key, d = 0) => weeks.map((w) => [`Week of ${w.week}`, fmt(w[key], d)]);
 
-  view.innerHTML = `<h1>Progress</h1>
+  view.innerHTML = `<div class="spread"><h1>Progress</h1>
+      <a class="btn" href="#/report?from=${sinceIso}&to=${localIsoDate()}">Print report</a></div>
     <div class="spread"><div class="segmented" role="group" aria-label="Time range">
       ${rangeBtn("12", "12 wk")}${rangeBtn("26", "26 wk")}${rangeBtn("52", "1 yr")}${rangeBtn("all", "All")}</div></div>
     <h2>Weekly training</h2>
@@ -1133,18 +1137,249 @@ function renderProgress(params) {
   else if (bp.length) addChart("c-bp", bpAllConfig(c, bp));
   if (wt.length) addChart("c-weight", weightChartConfig(c, wt, fasts));
   for (const [id, rows, key, label] of [["c-fat", fat, "body_fat_pct", "Body fat (%)"], ["c-muscle", muscle, "muscle_mass_lb", "Muscle mass (lb)"]]) {
-    if (!rows.length) continue;
-    const pts = rows.map((m) => ({ x: dayNum(m.taken_at), y: m[key] }));
-    const line = lineDataset(c, label, pts, c.s1);
-    if (pts.length > 60) Object.assign(line, { pointRadius: 0, pointHoverRadius: 5 });
-    const o = baseOptions(c);
-    o.scales.x = { ...o.scales.x, type: "linear", min: pts[0].x - 1, max: pts.at(-1).x + 1,
-      ticks: { ...o.scales.x.ticks, callback: (v) => dayLabel(Math.round(v)) } };
-    o.scales.y.beginAtZero = false;
-    o.scales.y.ticks.precision = undefined;
-    o.plugins.tooltip.callbacks = { title: (items) => dayLabel(items[0].parsed.x), label: (ctx) => `${label}: ${fmt(ctx.parsed.y, 1)}` };
-    addChart(id, { type: "line", data: { datasets: [line] }, options: o });
+    if (rows.length) addChart(id, dayLineConfig(c, rows, key, label));
   }
+}
+
+// One measurement field over time on a true day axis.
+function dayLineConfig(c, rows, key, label) {
+  const pts = rows.map((m) => ({ x: dayNum(m.taken_at), y: m[key] }));
+  const line = lineDataset(c, label, pts, c.s1);
+  if (pts.length > 60) Object.assign(line, { pointRadius: 0, pointHoverRadius: 5 });
+  const o = baseOptions(c);
+  o.scales.x = { ...o.scales.x, type: "linear", min: pts[0].x - 1, max: pts.at(-1).x + 1,
+    ticks: { ...o.scales.x.ticks, callback: (v) => dayLabel(Math.round(v)) } };
+  o.scales.y.beginAtZero = false;
+  o.scales.y.ticks.precision = undefined;
+  o.plugins.tooltip.callbacks = { title: (items) => dayLabel(items[0].parsed.x), label: (ctx) => `${label}: ${fmt(ctx.parsed.y, 1)}` };
+  return { type: "line", data: { datasets: [line] }, options: o };
+}
+
+// ------------------------------------------------------------------ printable report (Print → Save as PDF)
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const r1 = (x) => Math.round(x * 10) / 10;
+const shiftDays = (iso, n) => { const d = new Date(`${iso}T12:00:00`); d.setDate(d.getDate() + n); return localIsoDate(d); };
+
+// Draws a chart at paper width in a hidden canvas and returns a PNG, so the printout looks the
+// same whatever screen it was made on.
+function chartImage(config, height = 260) {
+  const width = 720;
+  const box = document.createElement("div");
+  box.className = "offscreen";
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  box.append(canvas);
+  document.body.append(box);
+  config.options = { ...config.options, responsive: false, devicePixelRatio: 2, animation: false };
+  const chart = new window.Chart(canvas, config);
+  const url = chart.toBase64Image("image/png");
+  chart.destroy();
+  box.remove();
+  return url;
+}
+
+// The report is always printed light, even when the phone is in dark mode.
+function paperColors() {
+  const probe = document.createElement("div");
+  probe.className = "paper";
+  document.body.append(probe);
+  const c = themeColors(probe);
+  probe.remove();
+  return c;
+}
+
+function reportFigure(url, alt, caption) {
+  return `<figure class="report-fig"><img src="${url}" alt="${esc(alt)}">
+    ${caption ? `<figcaption class="small muted">${esc(caption)}</figcaption>` : ""}</figure>`;
+}
+
+// align: one letter per column, "l" text, "n" text kept on one line, "r" numbers
+// (default: first column text, rest numbers).
+function reportTable(head, rows, foot, align = "l") {
+  const cls = { l: "", n: "nw", r: "r" };
+  const cells = (r, tag) => r.map((v, k) => `<${tag} class="${cls[align[k] || "r"]}">${esc(v)}</${tag}>`).join("");
+  return `<div class="table-wrap"><table><thead><tr>${cells(head, "th")}</tr></thead>
+    <tbody>${rows.map((r) => `<tr>${cells(r, "td")}</tr>`).join("")}</tbody>
+    ${foot ? `<tfoot><tr>${cells(foot, "th")}</tr></tfoot>` : ""}</table></div>`;
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let row = [], cell = "", quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (ch === '"') quoted = false;
+      else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ",") { row.push(cell); cell = ""; }
+    else if (ch === "\n") { row.push(cell); rows.push(row); row = []; cell = ""; }
+    else if (ch !== "\r") cell += ch;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  const [head = [], ...body] = rows;
+  return body.map((r) => Object.fromEntries(head.map((h, k) => [h, r[k] ?? ""])));
+}
+
+// Every set and interval round, from data/clean/sets.csv (fetched once per data load).
+async function loadSetRows() {
+  if (!state.setRows) {
+    const num = (v) => (v === "" ? null : Number(v));
+    state.setRows = parseCsv(await gh.getRaw("data/clean/sets.csv")).map((r) => ({
+      workout_id: r.workout_id, date: r.date, block_kind: r.block_kind, round: num(r.round), exercise: r.exercise,
+      reps: num(r.reps), seconds: num(r.seconds), weight_lb: num(r.weight_lb), bells: num(r.bells) || 1,
+      per_side: r.per_side === "True", total_reps: num(r.total_reps) || 0, volume_lb: num(r.volume_lb) || 0,
+    }));
+  }
+  return state.setRows;
+}
+
+// Training minutes per day for ranges up to a month, per week (Monday start) beyond that.
+function minutesBuckets(ws, from, to) {
+  const daily = dayNum(to) - dayNum(from) < 31;
+  const key = (iso) => (daily ? iso : weekStart(iso));
+  const out = new Map();
+  for (let d = key(from); d <= to; d = shiftDays(d, daily ? 1 : 7)) out.set(d, 0);
+  for (const w of ws) if (out.has(key(w.date))) out.set(key(w.date), r1(out.get(key(w.date)) + (w.duration_min || 0)));
+  return { daily, buckets: [...out.entries()] };
+}
+
+function workoutCalories(w) {
+  const machine = (w.cardio || []).reduce((a, c) => a + (Number(c.calories) || 0), 0);
+  return machine || w.polar?.calories || null;
+}
+
+function workoutDistance(w) {
+  const machine = (w.cardio || []).reduce((a, c) => a + (Number(c.distance_mi) || 0), 0);
+  return machine || w.polar?.distance_mi || null;
+}
+
+function renderReport(params) {
+  const today = localIsoDate();
+  let from = ISO_DATE.test(params.from || "") ? params.from : shiftDays(today, -27);
+  let to = ISO_DATE.test(params.to || "") ? params.to : today;
+  if (from > to) [from, to] = [to, from];
+  const inRange = (iso) => iso.slice(0, 10) >= from && iso.slice(0, 10) <= to;
+  const c = paperColors();
+
+  const ws = allWorkouts().filter((w) => inRange(w.date)).reverse();
+  const ms = allMeasurements().filter((m) => inRange(m.taken_at));
+  const wt = ms.filter((m) => m.kind === "weight");
+  const fasts = ms.filter((m) => m.kind === "fasting");
+  const bp = ms.filter((m) => m.kind === "blood_pressure");
+  const fat = wt.filter((m) => m.body_fat_pct != null);
+  const muscle = wt.filter((m) => m.muscle_mass_lb != null);
+  const sum = (key) => ws.reduce((a, w) => a + (w[key] || 0), 0);
+
+  // Controls (not printed).
+  const firstDay = [allWorkouts().at(-1)?.date, allMeasurements()[0]?.taken_at.slice(0, 10)].filter(Boolean).sort()[0] || today;
+  const presets = [["4 wk", shiftDays(today, -27), today], ["12 wk", shiftDays(today, -83), today],
+    ["This year", `${today.slice(0, 4)}-01-01`, today], ["All", firstDay, today]];
+  const presetBtn = ([label, f, t]) => `<button data-go="#/report?from=${f}&to=${t}" aria-pressed="${f === from && t === to}">${label}</button>`;
+
+  // Workouts.
+  const { daily, buckets } = minutesBuckets(ws, from, to);
+  const workoutsHTML = ws.length ? `
+    ${reportFigure(chartImage(barConfig(c, buckets.map(([d]) => shortDate(d)), buckets.map(([, v]) => v), "Minutes")),
+      "Training minutes chart", daily ? "Training minutes per day" : "Training minutes per week (weeks start Monday)")}
+    ${reportTable(["Date", "Start", "Workout", "Minutes", "Reps", "Volume (lb)", "Distance (mi)", "Avg HR", "Calories"],
+      ws.map((w) => [w.date, w.start || "–", w.title, fmt(w.duration_min, 1), fmt(w.total_reps || null), fmt(w.volume_lb || null),
+        fmt(workoutDistance(w), 2), w.polar?.avg_hr ?? "–", fmt(workoutCalories(w))]),
+      [`${ws.length} workout${ws.length === 1 ? "" : "s"}`, "", "", fmt(r1(sum("duration_min")), 1), fmt(sum("total_reps")),
+        fmt(r1(sum("volume_lb"))), fmt(ws.reduce((a, w) => a + (workoutDistance(w) || 0), 0) || null, 2), "",
+        fmt(ws.reduce((a, w) => a + (workoutCalories(w) || 0), 0) || null)], "lll")}` :
+    `<p class="muted">No workouts in this range.</p>`;
+
+  // Measurements.
+  const bpAvg = (key) => Math.round(bp.reduce((a, m) => a + m[key], 0) / bp.length);
+  const measureHTML = [
+    wt.length || fasts.length ? `<h3>Body weight</h3>
+      ${wt.length ? reportFigure(chartImage(weightChartConfig(c, wt, fasts)), "Body weight chart",
+        `${wt.length > 1 ? `${fmt(wt[0].weight_lb, 1)} → ${fmt(wt.at(-1).weight_lb, 1)} lb (${wt.at(-1).weight_lb - wt[0].weight_lb > 0 ? "+" : ""}${fmt(wt.at(-1).weight_lb - wt[0].weight_lb, 1)})` : ""}${fasts.length ? `${wt.length > 1 ? ". " : ""}Triangles along the bottom mark fasting days` : ""}`) : ""}
+      ${reportTable(["Date", "Weight (lb)", "Fasting"], weightTableRows(wt, fasts), null, "lrl")}` : "",
+    bp.length ? `<h3>Blood pressure (mmHg)</h3>
+      ${reportFigure(chartImage(bpAllConfig(c, bp)), "Blood pressure chart",
+        `Average ${bpAvg("systolic")}/${bpAvg("diastolic")} over ${bp.length} reading${bp.length === 1 ? "" : "s"}`)}
+      ${reportTable(["Taken", "Systolic", "Diastolic", "Pulse", "Notes"],
+        bp.map((m) => [m.taken_at.replace("T", " "), m.systolic, m.diastolic, m.pulse ?? "–",
+          [m.irregular_heartbeat ? "irregular heartbeat" : "", m.notes || ""].filter(Boolean).join(" · ")]), null, "lrrrl")}` : "",
+    fat.length || muscle.length ? `<h3>Body composition</h3>
+      ${fat.length ? reportFigure(chartImage(dayLineConfig(c, fat, "body_fat_pct", "Body fat (%)"), 200), "Body fat chart", "Body fat (%)") : ""}
+      ${muscle.length ? reportFigure(chartImage(dayLineConfig(c, muscle, "muscle_mass_lb", "Muscle mass (lb)"), 200), "Muscle mass chart", "Muscle mass (lb)") : ""}
+      ${reportTable(["Taken", "Weight (lb)", "Body fat (%)", "Muscle (lb)"],
+        wt.filter((m) => m.body_fat_pct != null || m.muscle_mass_lb != null).map((m) =>
+          [m.taken_at.replace("T", " "), fmt(m.weight_lb, 1), fmt(m.body_fat_pct, 1), fmt(m.muscle_mass_lb, 1)]))}` : "",
+  ].join("") || `<p class="muted">No measurements in this range.</p>`;
+
+  const tile = (label, v) => `<div class="tile"><div class="label">${label}</div><div class="value num">${v}</div></div>`;
+  document.title = `Fitness Log ${from} to ${to}`; // Chrome uses this as the PDF file name
+  view.innerHTML = `
+    <div class="report-controls">
+      <h1>Printable report</h1>
+      <div class="grid-2"><label>From<input type="date" id="r-from" value="${from}" max="${today}"></label>
+        <label>To<input type="date" id="r-to" value="${to}" max="${today}"></label></div>
+      <div class="spread"><div class="segmented" role="group" aria-label="Report range">${presets.map(presetBtn).join("")}</div>
+        <button class="primary" id="r-print" type="button">Print / Save as PDF</button></div>
+      <p class="field-hint">In the print dialog choose <strong>Save as PDF</strong> as the printer.</p>
+    </div>
+    <article class="paper report">
+      <header><h1>Fitness Log</h1><p class="secondary">${longDate(from)} – ${longDate(to)}</p></header>
+      <div class="grid-tiles">${tile("Workouts", fmt(ws.length))}${tile("Minutes", fmt(sum("duration_min")))}
+        ${tile("Total reps", fmt(sum("total_reps")))}${tile("Volume (lb)", fmt(sum("volume_lb")))}</div>
+      <section><h2>Workouts</h2>${workoutsHTML}</section>
+      <section><h2>Sets</h2><div id="r-sets"><p class="muted">Loading sets…</p></div></section>
+      <section><h2>Measurements</h2>${measureHTML}</section>
+      <footer class="small muted">Generated ${longDate(today)} from ${esc(gh.loadSettings().repo || "Fitness Log")}.</footer>
+    </article>`;
+
+  const go = () => {
+    const f = document.getElementById("r-from").value, t = document.getElementById("r-to").value;
+    if (ISO_DATE.test(f) && ISO_DATE.test(t)) location.hash = `#/report?from=${f}&to=${t}`;
+  };
+  document.getElementById("r-from").onchange = go;
+  document.getElementById("r-to").onchange = go;
+  document.getElementById("r-print").onclick = () => window.print();
+  drawReportSets(ws, inRange, c);
+}
+
+async function drawReportSets(ws, inRange, c) {
+  const el = document.getElementById("r-sets");
+  const titles = new Map(ws.map((w) => [w.id, w.title]));
+  let rows, note = "";
+  try {
+    rows = (await loadSetRows()).filter((r) => inRange(r.date) && titles.has(r.workout_id));
+    const missing = ws.filter((w) => w.pending && Object.keys(w.exercises || {}).length).length;
+    if (missing) note = `${missing} workout${missing === 1 ? " was" : "s were"} saved in the last few minutes and will appear here once synced.`;
+  } catch {
+    // Offline or not built yet: fall back to one row per exercise per workout.
+    rows = ws.flatMap((w) => Object.entries(w.exercises || {}).map(([ex, d]) => ({ workout_id: w.id, date: w.date,
+      exercise: ex, round: null, total_reps: d.total_reps, weight_lb: d.max_weight_lb, volume_lb: d.volume_lb, summary: true })));
+    note = "Couldn't load the individual sets, so this shows one row per exercise (heaviest weight).";
+  }
+  if (!document.body.contains(el)) return; // navigated away while loading
+  if (!rows.length) { el.innerHTML = `<p class="muted">No sets in this range.</p>`; return; }
+  const byEx = new Map();
+  for (const r of rows) byEx.set(r.exercise, (byEx.get(r.exercise) || 0) + r.total_reps);
+  const top = [...byEx.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+  const cfg = barConfig(c, top.map(([ex]) => catalog.name(ex)), top.map(([, n]) => n), "Reps");
+  cfg.options.indexAxis = "y";
+  Object.assign(cfg.data.datasets[0], { borderRadius: { topRight: 4, bottomRight: 4 }, borderSkipped: "left" });
+  const { x, y } = cfg.options.scales;
+  cfg.options.scales = { x: y, y: { ...x, ticks: { ...x.ticks, autoSkip: false } } };
+  const setLabel = (r) => (r.round == null ? "–" : `${r.block_kind === "interval" ? "Round" : "Set"} ${r.round}`);
+  const reps = (r) => (r.reps == null && !r.summary ? (r.seconds ? `${r.seconds} s` : "–") : `${fmt(r.summary ? r.total_reps : r.reps)}${r.per_side ? " / side" : ""}`);
+  const weight = (r) => (r.weight_lb == null ? "–" : `${r.bells > 1 ? `${r.bells} × ` : ""}${fmt(r.weight_lb, 1)}`);
+  el.innerHTML = `
+    ${reportFigure(chartImage(cfg, 48 + 30 * top.length), "Reps per exercise chart",
+      `Total reps per exercise${byEx.size > top.length ? ` (top ${top.length} of ${byEx.size})` : ""}`)}
+    ${note ? `<p class="small muted">${esc(note)}</p>` : ""}
+    ${reportTable(["Date", "Workout", "Exercise", "Set", "Reps", "Weight (lb)", "Volume (lb)"],
+      rows.map((r) => [r.date, titles.get(r.workout_id), catalog.name(r.exercise), setLabel(r), reps(r), weight(r), fmt(r.volume_lb || null)]),
+      [`${rows.length} ${rows[0].summary ? "exercise rows" : "sets"}`, "", "", "", fmt(rows.reduce((a, r) => a + r.total_reps, 0)), "",
+        fmt(r1(rows.reduce((a, r) => a + r.volume_lb, 0)))], "llln")}`;
 }
 
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
