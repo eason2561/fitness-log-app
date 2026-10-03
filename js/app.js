@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.03-1 (photo reading)";
+const APP_VERSION = "2026.10.03-2 (Omron import)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -801,7 +801,7 @@ function renderHistory(params) {
       : m.kind === "fasting" ? `Fasted${m.hours ? ` ${fmt(m.hours, 1)} h` : ""}` : `${m.bpm} bpm`;
     const kindName = { blood_pressure: "Blood pressure", weight: "Weight", resting_hr: "Resting HR", fasting: "Fasting day" };
     body = `<div class="card">${ms.length ? `<ul class="list">${ms.map((m) => `<li><div class="item">
-      <span><strong class="num">${esc(desc(m))}</strong><br><span class="meta">${kindName[m.kind] || esc(m.kind)}${m.source === "withings" ? " · Withings" : ""}${m.notes ? ` · ${esc(m.notes)}` : ""}</span></span>
+      <span><strong class="num">${esc(desc(m))}</strong><br><span class="meta">${kindName[m.kind] || esc(m.kind)}${m.source === "withings" ? " · Withings" : m.source === "omron" ? " · Omron" : ""}${m.irregular_heartbeat ? " · irregular heartbeat" : ""}${m.notes ? ` · ${esc(m.notes)}` : ""}</span></span>
       <span class="meta num">${esc(m.kind === "fasting" ? m.taken_at.slice(0, 10) : m.taken_at.replace("T", " "))}</span></div></li>`).join("")}</ul>` : `<p class="muted">No measurements yet.</p>`}</div>
       <a class="btn" href="#/measure">Add a reading</a>`;
   } else {
@@ -1058,9 +1058,20 @@ function renderMeasure(params) {
       <label>Notes<input name="notes" placeholder="optional"></label>
       <button class="primary" type="submit">Save reading</button>
     </form>
-    ${kind === "blood_pressure" ? `<p class="small muted">Taking 2–3 readings? Save each one; they're kept separately.</p>` : ""}
+    ${kind === "blood_pressure" ? `<p class="small muted">Taking 2–3 readings? Save each one; they're kept separately.</p>
+      <h2>Import from OMRON connect</h2>
+      <div class="card stack">
+        <p class="small secondary">In OMRON connect: <strong>History → Share → CSV</strong> (or the graph screen's ⋯ →
+          <strong>Export measurement data</strong>) and save the file. Then pick it here. Overlapping exports and
+          readings you already typed in are de-duplicated.</p>
+        <label class="btn" for="omron-file">Import Omron CSV</label>
+        <input id="omron-file" type="file" accept=".csv,text/csv,text/comma-separated-values" hidden>
+        <p id="omron-status" class="small"></p>
+      </div>` : ""}
     ${kind === "fasting" ? `<p class="small muted">Fasting days show as markers on the body weight chart in Progress.</p>` : ""}`;
 
+  const omronInput = document.getElementById("omron-file");
+  if (omronInput) omronInput.onchange = () => importOmron(omronInput.files[0]);
   document.getElementById("m-form").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
@@ -1092,6 +1103,37 @@ function renderMeasure(params) {
       toast(err.message);
     }
   };
+}
+
+async function importOmron(file) {
+  const status = document.getElementById("omron-status");
+  if (!file) return;
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const text = new TextDecoder().decode(bytes);
+  const lines = text.split(/\r?\n/);
+  const headerAt = lines.findIndex((l) => /sys/i.test(l));
+  if (headerAt < 0) {
+    status.textContent = "That doesn't look like an OMRON connect CSV export (no systolic column).";
+    status.className = "small notice error";
+    return;
+  }
+  const count = lines.slice(headerAt + 1).filter((l) => /\d/.test(l) && l.split(",").length >= 3).length;
+  const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].slice(0, 4)
+    .map((b) => b.toString(16).padStart(2, "0")).join("");
+  const d = new Date();
+  const stamp = `${localIsoDate(d)}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  status.textContent = `Uploading ${count} reading${count === 1 ? "" : "s"}…`;
+  status.className = "small";
+  try {
+    const { queued } = await outbox.perform([{ op: "put", path: `data/raw/omron/${stamp}-${digest}.csv`,
+      content: gh.bytesToBase64(bytes), message: `Import Omron export (${count} readings) (app)` }]);
+    status.textContent = queued
+      ? "Saved on this device; it will upload when you're online."
+      : `Uploaded the export (about ${count} reading${count === 1 ? "" : "s"}). They'll appear in about a minute (Settings → Reload data).`;
+  } catch (err) {
+    status.textContent = err.message;
+    status.className = "small notice error";
+  }
 }
 
 // ------------------------------------------------------------------ Life Fitness photo
