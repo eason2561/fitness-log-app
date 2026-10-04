@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.03-6 (printable report)";
+const APP_VERSION = "2026.10.04-1 (latest weight on home)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -239,7 +239,13 @@ function renderHome() {
   const prev = weeks.find((w) => w.week === lastWeek) || { sessions: 0, swings: 0, volume_lb: 0, minutes: 0 };
   const tile = (label, v, p, d = 0) =>
     `<div class="tile"><div class="label">${label}</div><div class="value">${fmt(v, d)}</div><div class="delta">Last week ${fmt(p, d)}</div></div>`;
-  const bp = allMeasurements().filter((m) => m.kind === "blood_pressure").at(-1);
+  const ms = allMeasurements();
+  const bp = ms.filter((m) => m.kind === "blood_pressure").at(-1);
+  const wts = ms.filter((m) => m.kind === "weight" && m.weight_lb != null);
+  const wt = wts.at(-1);
+  // Change against the latest weigh-in at least a week before this one.
+  const weekBefore = wt && wts.findLast((m) => dayNum(m.taken_at) <= dayNum(wt.taken_at) - 7);
+  const wtDelta = weekBefore ? wt.weight_lb - weekBefore.weight_lb : null;
   const photos = state.bundle.pending_photos || [];
 
   view.innerHTML = `
@@ -257,6 +263,9 @@ function renderHome() {
       <a class="btn" href="#/photo">Machine photo</a>
       <a class="btn" href="#/measure">BP / weight / fasting</a>
     </div>
+    ${wt ? `<div class="card spread"><span><span class="secondary small">Latest weight</span><br>
+      <strong class="num">${fmt(wt.weight_lb, 1)} lb</strong>${wtDelta != null ? ` <span class="muted">· ${wtDelta > 0 ? "+" : wtDelta < 0 ? "−" : "±"}${fmt(Math.abs(wtDelta), 1)} lb vs a week ago</span>` : ""}</span>
+      <span class="meta">${esc(wt.taken_at.replace("T", " "))}</span></div>` : ""}
     ${bp ? `<div class="card spread"><span><span class="secondary small">Latest blood pressure</span><br>
       <strong class="num">${bp.systolic}/${bp.diastolic}</strong>${bp.pulse ? ` <span class="muted">· pulse ${bp.pulse}</span>` : ""}</span>
       <span class="meta">${esc(bp.taken_at.replace("T", " "))}</span></div>` : ""}
@@ -920,7 +929,8 @@ function weightTableRows(wt, fasts) {
     const d = m.taken_at.slice(0, 10);
     rows.set(d, { w: rows.get(d)?.w ?? "–", f: m.hours ? `Yes (${fmt(m.hours, 1)} h)` : "Yes" });
   }
-  return [...rows.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([d, r]) => [d, r.w, r.f]);
+  // Newest first.
+  return [...rows.entries()].sort((a, b) => b[0].localeCompare(a[0])).map(([d, r]) => [d, r.w, r.f]);
 }
 
 // Morning = 03:00–11:59. Evening = 12:00–02:59; a reading after midnight counts toward the evening before.
