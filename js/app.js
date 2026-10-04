@@ -6,13 +6,13 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.04-1 (latest weight on home)";
+const APP_VERSION = "2026.10.04-2 (Fitbit sleep, steps, resting HR, HRV)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
 // ------------------------------------------------------------------ state
 
-const EMPTY_BUNDLE = { workouts: [], measurements: [], weekly: [], exercises: [], templates: [], pending_photos: [] };
+const EMPTY_BUNDLE = { workouts: [], measurements: [], daily: [], weekly: [], exercises: [], templates: [], pending_photos: [] };
 
 function readJSON(key, fallback) {
   try {
@@ -125,6 +125,7 @@ const fmt = (n, d = 0) => (n == null || n === "" ? "–" : Number(n).toLocaleStr
 const pad = (n) => String(n).padStart(2, "0");
 const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const nowLocal = () => `${localIsoDate()}T${nowTime()}`;
+const hoursMin = (min) => (min == null ? "–" : `${Math.floor(min / 60)} h ${String(Math.round(min % 60)).padStart(2, "0")} m`);
 const shortDate = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 const longDate = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
 const workoutPath = (id) => `data/manual/workouts/${id.slice(0, 4)}/${id}.yaml`;
@@ -247,6 +248,8 @@ function renderHome() {
   const weekBefore = wt && wts.findLast((m) => dayNum(m.taken_at) <= dayNum(wt.taken_at) - 7);
   const wtDelta = weekBefore ? wt.weight_lb - weekBefore.weight_lb : null;
   const photos = state.bundle.pending_photos || [];
+  const night = (state.bundle.daily || []).filter((r) => r.sleep_min != null).at(-1);
+  const today = (state.bundle.daily || []).at(-1);
 
   view.innerHTML = `
     ${setupNotice()}
@@ -266,6 +269,10 @@ function renderHome() {
     ${wt ? `<div class="card spread"><span><span class="secondary small">Latest weight</span><br>
       <strong class="num">${fmt(wt.weight_lb, 1)} lb</strong>${wtDelta != null ? ` <span class="muted">· ${wtDelta > 0 ? "+" : wtDelta < 0 ? "−" : "±"}${fmt(Math.abs(wtDelta), 1)} lb vs a week ago</span>` : ""}</span>
       <span class="meta">${esc(wt.taken_at.replace("T", " "))}</span></div>` : ""}
+    ${night ? `<div class="card spread"><span><span class="secondary small">Sleep, night ending ${esc(shortDate(night.date))}</span><br>
+      <strong class="num">${hoursMin(night.sleep_min)}</strong>${night.hrv_ms != null || night.resting_hr != null ? ` <span class="muted">· ${[
+        night.resting_hr != null ? `resting HR ${night.resting_hr}` : "", night.hrv_ms != null ? `HRV ${fmt(night.hrv_ms, 0)} ms` : ""].filter(Boolean).join(" · ")}</span>` : ""}</span>
+      <span class="meta">${esc(night.bedtime || "")}–${esc(night.wake_time || "")}${today?.steps != null ? `<br>${fmt(today.steps)} steps ${today.date === localIsoDate() ? "today" : esc(shortDate(today.date))}` : ""}</span></div>` : ""}
     ${bp ? `<div class="card spread"><span><span class="secondary small">Latest blood pressure</span><br>
       <strong class="num">${bp.systolic}/${bp.diastolic}</strong>${bp.pulse ? ` <span class="muted">· pulse ${bp.pulse}</span>` : ""}</span>
       <span class="meta">${esc(bp.taken_at.replace("T", " "))}</span></div>` : ""}
@@ -808,7 +815,8 @@ function renderHistory(params) {
       <div class="card"><ul class="list">${list.map(workoutItem).join("")}</ul></div>`).join("") ||
       `<div class="card muted">No workouts yet.</div>`;
   } else if (tab === "measurements") {
-    const ms = allMeasurements().slice().reverse();
+    // Fitbit's daily resting HR is charted in Progress; listing a row per day here would bury everything else.
+    const ms = allMeasurements().filter((m) => m.source !== "fitbit").reverse();
     const desc = (m) => m.kind === "blood_pressure" ? `${m.systolic}/${m.diastolic}${m.pulse ? ` · pulse ${m.pulse}` : ""}`
       : m.kind === "weight" ? `${fmt(m.weight_lb, 1)} lb${m.body_fat_pct ? ` · ${m.body_fat_pct}% fat` : ""}${m.muscle_mass_lb ? ` · ${fmt(m.muscle_mass_lb, 1)} lb muscle` : ""}`
       : m.kind === "fasting" ? `Fasted${m.hours ? ` ${fmt(m.hours, 1)} h` : ""}` : `${m.bpm} bpm`;
@@ -1079,6 +1087,14 @@ function renderProgress(params) {
   const fasts = allMeasurements().filter((m) => m.kind === "fasting" && m.taken_at.slice(0, 10) >= sinceIso);
   const fat = wt.filter((m) => m.body_fat_pct != null);
   const muscle = wt.filter((m) => m.muscle_mass_lb != null);
+  // Fitbit daily rows, shaped like measurements so dayLineConfig can draw them.
+  const daily = (state.bundle.daily || []).filter((r) => r.date >= sinceIso).map((r) => ({ ...r, taken_at: r.date,
+    sleep_h: r.sleep_min != null ? Math.round(r.sleep_min / 6) / 10 : null }));
+  const sleepRows = daily.filter((r) => r.sleep_h != null);
+  const stepRows = daily.filter((r) => r.steps != null);
+  const rhrRows = allMeasurements().filter((m) => m.kind === "resting_hr" && m.taken_at.slice(0, 10) >= sinceIso);
+  const hrvRows = daily.filter((r) => r.hrv_ms != null);
+  const newest = (rows) => rows.slice().reverse();
 
   const progressHash = (o = {}) => {
     const q = { range, ex, bp: bpView, ...o };
@@ -1127,7 +1143,19 @@ function renderProgress(params) {
         fat.map((m) => [m.taken_at.replace("T", " "), fmt(m.body_fat_pct, 1)])) : ""}
       ${muscle.length ? chartCard("c-muscle", "Muscle mass (lb)", "From the Withings scale", ["Taken", "Muscle mass (lb)"],
         muscle.map((m) => [m.taken_at.replace("T", " "), fmt(m.muscle_mass_lb, 1)])) : ""}
-    </div>`;
+    </div>
+    ${sleepRows.length || stepRows.length || rhrRows.length || hrvRows.length ? `<h2>Sleep and recovery</h2>
+    <div class="charts">
+      ${sleepRows.length ? chartCard("c-sleep", "Sleep per night (hours)", "Main sleep, dated by the morning it ended. From Fitbit.",
+        ["Night ending", "Asleep", "Deep", "REM", "Bed–wake"], newest(sleepRows).map((r) => [r.date, hoursMin(r.sleep_min),
+          r.deep_min != null ? `${r.deep_min} m` : "–", r.rem_min != null ? `${r.rem_min} m` : "–", `${r.bedtime || "?"}–${r.wake_time || "?"}`])) : ""}
+      ${stepRows.length ? chartCard("c-steps", "Steps per day", "From Fitbit", ["Date", "Steps"],
+        newest(stepRows).map((r) => [r.date, fmt(r.steps)])) : ""}
+      ${rhrRows.length ? chartCard("c-rhr", "Resting heart rate (bpm)", null, ["Date", "bpm", "Source"],
+        newest(rhrRows).map((m) => [m.taken_at.slice(0, 10), m.bpm, m.source === "fitbit" ? "Fitbit" : "Typed in"])) : ""}
+      ${hrvRows.length ? chartCard("c-hrv", "Heart rate variability (ms)", "Nightly average (RMSSD). From Fitbit.", ["Date", "HRV (ms)"],
+        newest(hrvRows).map((r) => [r.date, fmt(r.hrv_ms, 1)])) : ""}
+    </div>` : ""}`;
 
   const pick = document.getElementById("ex-pick");
   if (pick) pick.onchange = () => (location.hash = progressHash({ ex: pick.value }));
@@ -1146,7 +1174,9 @@ function renderProgress(params) {
   if (bp.length && bpView === "split") addChart("c-bp", bpSplitConfig(c, sessions));
   else if (bp.length) addChart("c-bp", bpAllConfig(c, bp));
   if (wt.length) addChart("c-weight", weightChartConfig(c, wt, fasts));
-  for (const [id, rows, key, label] of [["c-fat", fat, "body_fat_pct", "Body fat (%)"], ["c-muscle", muscle, "muscle_mass_lb", "Muscle mass (lb)"]]) {
+  for (const [id, rows, key, label] of [["c-fat", fat, "body_fat_pct", "Body fat (%)"], ["c-muscle", muscle, "muscle_mass_lb", "Muscle mass (lb)"],
+    ["c-sleep", sleepRows, "sleep_h", "Asleep (h)"], ["c-steps", stepRows, "steps", "Steps"], ["c-rhr", rhrRows, "bpm", "Resting HR (bpm)"],
+    ["c-hrv", hrvRows, "hrv_ms", "HRV (ms)"]]) {
     if (rows.length) addChart(id, dayLineConfig(c, rows, key, label));
   }
 }
@@ -1715,6 +1745,17 @@ async function renderSettings() {
       <p class="field-hint">Approve quickly when Withings asks: its sign-in codes expire after about 30 seconds.</p>
       <p id="withings-status" class="small"></p>
     </div>
+    <h2>Fitbit</h2>
+    <div class="card stack">
+      ${fitbitStatus()}
+      <label>Google OAuth client ID<input id="fitbit-client" value="${esc(s.fitbitClientId || "")}" autocapitalize="off" placeholder="…apps.googleusercontent.com"></label>
+      <div class="row">
+        <button type="button" id="fitbit-connect">${(state.bundle.daily || []).length ? "Reconnect Fitbit" : "Connect Fitbit"}</button>
+        <button type="button" id="fitbit-sync">Sync Fitbit now</button>
+      </div>
+      <p class="field-hint">Sleep, steps, resting heart rate and HRV through the Google Health API. Setup: README → Fitbit.</p>
+      <p id="fitbit-status" class="small"></p>
+    </div>
     <h2>Waiting to sync</h2>
     <div class="card">${ops.length ? `<ul class="list">${ops.map((o) => `<li><div class="item"><span>${esc(o.message)}<br>
         <span class="meta">${esc(o.path)}</span>${o.error ? `<br><span class="small notice error">${esc(o.error)}</span>` : ""}</span>
@@ -1792,6 +1833,30 @@ async function renderSettings() {
       e.target.disabled = false;
     }
   };
+  const fStatus = document.getElementById("fitbit-status");
+  document.getElementById("fitbit-connect").onclick = () => {
+    const clientId = document.getElementById("fitbit-client").value.trim();
+    if (!clientId) return toast("Enter your Google OAuth client ID first.");
+    gh.saveSettings({ ...gh.loadSettings(), fitbitClientId: clientId });
+    const stateTag = `fitbit-${Math.random().toString(36).slice(2, 10)}`;
+    sessionStorage.setItem("fitlog:oauthState", stateTag);
+    try { localStorage.setItem("fitlog:oauthState", stateTag); } catch {}
+    const q = new URLSearchParams({ response_type: "code", client_id: clientId, redirect_uri: appRedirectUri(),
+      scope: FITBIT_SCOPES.join(" "), access_type: "offline", prompt: "consent", include_granted_scopes: "true", state: stateTag });
+    location.href = `https://accounts.google.com/o/oauth2/v2/auth?${q}`;
+  };
+  document.getElementById("fitbit-sync").onclick = async (e) => {
+    e.target.disabled = true;
+    fStatus.textContent = "Starting sync…";
+    try {
+      await gh.dispatchWorkflow("fitbit-sync.yml");
+      fStatus.textContent = "Sync started. New days appear in about a minute (use Reload data).";
+    } catch (err) {
+      fStatus.innerHTML = workflowHelp(err, "fitbit-sync.yml", "Sync Fitbit");
+    } finally {
+      e.target.disabled = false;
+    }
+  };
   document.getElementById("s-refresh").onclick = () => refresh().then(() => toast("Data reloaded."));
   document.getElementById("s-sync")?.addEventListener("click", () => syncNow().then(renderSettings));
   view.querySelectorAll("[data-discard]").forEach((b) => (b.onclick = async () => {
@@ -1834,6 +1899,17 @@ function withingsStatus() {
     (${fmt(last.weight_lb, 1)} lb)</p>`;
 }
 
+// Same list as SCOPES in src/fitlog/fitbit.py.
+const FITBIT_SCOPES = ["sleep.readonly", "activity_and_fitness.readonly", "health_metrics_and_measurements.readonly"]
+  .map((s) => `https://www.googleapis.com/auth/googlehealth.${s}`);
+
+function fitbitStatus() {
+  const days = state.bundle.daily || [];
+  if (!days.length) return `<p class="small secondary">Not connected yet, or nothing synced.</p>`;
+  const nights = days.filter((r) => r.sleep_min != null).length;
+  return `<p class="small secondary">${days.length} day${days.length === 1 ? "" : "s"} synced (${nights} with sleep) · latest ${esc(shortDate(days.at(-1).date))}</p>`;
+}
+
 // Where Withings sends you back after approving; must match the callback registered with Withings.
 const appRedirectUri = () => location.origin + location.pathname;
 
@@ -1846,7 +1922,7 @@ function workflowHelp(err, file, name) {
   return `${why} You can run it on GitHub instead: <a href="${esc(url)}" target="_blank" rel="noopener">Actions → ${esc(name)} → Run workflow</a>.`;
 }
 
-// Polar and Withings send you back here as ?code=…&state=<service>-… after you approve access.
+// Polar, Withings and Google (Fitbit) send you back here as ?code=…&state=<service>-… after you approve access.
 async function handleOAuthReturn() {
   const q = new URLSearchParams(location.search);
   const code = q.get("code");
@@ -1863,7 +1939,8 @@ async function handleOAuthReturn() {
     sessionStorage.removeItem(k);
     try { localStorage.removeItem(k); } catch {}
   }
-  const service = (returned || expected || "polar").startsWith("withings") ? "Withings" : "Polar";
+  const tag = returned || expected || "polar";
+  const service = tag.startsWith("withings") ? "Withings" : tag.startsWith("fitbit") ? "Fitbit" : "Polar";
   if (!gh.isConfigured()) {
     // Usually: the Withings/Polar phone app handled the sign-in and opened this page in its own
     // built-in browser, which doesn't have your GitHub token.
@@ -1875,8 +1952,8 @@ async function handleOAuthReturn() {
         keeps taking over on the phone, the PC is the easiest way; you only need to do this once.</p></div>`;
     return;
   }
-  const file = service === "Withings" ? "withings-connect.yml" : "polar-connect.yml";
-  const inputs = service === "Withings" ? { code, redirect_uri: appRedirectUri() } : { code };
+  const file = { Withings: "withings-connect.yml", Fitbit: "fitbit-connect.yml", Polar: "polar-connect.yml" }[service];
+  const inputs = service === "Polar" ? { code } : { code, redirect_uri: appRedirectUri() };
   state.hold = true; // keep this message up even if a data refresh finishes meanwhile
   view.innerHTML = `<h1>Connecting ${service}…</h1><div class="card"><p id="pc-msg">Starting the Connect ${service} workflow…</p></div>`;
   const msg = document.getElementById("pc-msg");
@@ -1897,7 +1974,7 @@ async function handleOAuthReturn() {
       <span class="small muted">(${esc(err.message)})</span><br><br>
       Paste this code as the <strong>code</strong> input right away:<br>
       <input readonly value="${esc(code)}" aria-label="Authorization code">
-      ${service === "Withings" ? `<br>and this as <strong>redirect_uri</strong>:<br><input readonly value="${esc(appRedirectUri())}" aria-label="Redirect URI">` : ""}
+      ${service !== "Polar" ? `<br>and this as <strong>redirect_uri</strong>:<br><input readonly value="${esc(appRedirectUri())}" aria-label="Redirect URI">` : ""}
       <br><br><a class="btn" href="#/settings">Back to Settings</a>`;
   }
 }
