@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.04-1 (Strava and Concept2)";
+const APP_VERSION = "2026.11.04-2 (Concept2 splits)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -743,6 +743,17 @@ async function drawHr(pl) {
   addChart("c-hr", { type: "line", data: { datasets: [line] }, options: o });
 }
 
+// Splits or intervals from the Concept2 monitor (src/fitlog/concept2.py splits()).
+function splitsTable(splits) {
+  if (!splits?.length) return "";
+  const cols = [["time", "Time"], ["meters", "Meters"], ["pace", "Pace"], ["stroke_rate", "Rate"], ["watts", "Watts"],
+    ["avg_hr", "Avg HR"], ["max_hr", "Max HR"], ["calories", "Cal"], ["rest", "Rest"]].filter(([k]) => splits.some((s) => s[k] != null));
+  const cell = (k, v) => v == null ? "–" : k === "meters" ? fmt(v) : k === "pace" ? String(v).replace(/\/\d+m$/, "") : v;
+  return `<h3>Splits</h3><div class="card table-wrap"><table><thead><tr><th>#</th>${cols.map(([, h]) => `<th class="r">${h}</th>`).join("")}</tr></thead>
+    <tbody>${splits.map((s) => `<tr><td>${s.n}</td>${cols.map(([k]) => `<td class="r num">${esc(cell(k, s[k]))}</td>`).join("")}</tr>`).join("")}</tbody></table>
+    ${splits[0].pace ? `<p class="small muted">Pace per ${esc(splits[0].pace.split("/")[1])}</p>` : ""}</div>`;
+}
+
 function renderWorkout(_params, [id]) {
   const w = allWorkouts().find((x) => x.id === id);
   if (!w) {
@@ -769,7 +780,9 @@ function renderWorkout(_params, [id]) {
   const c2Card = c2 ? card("Concept2 Logbook", [["Machine", (c2.machine || "").replace(/_/g, " ")],
     ["Time", c2.duration_min != null ? `${fmt(c2.duration_min, 1)} min` : null], ["Distance", c2.meters != null ? `${fmt(c2.meters)} m` : null],
     ["Pace", c2.pace], ["Stroke rate", c2.stroke_rate], ["Avg heart rate", c2.avg_hr], ["Max heart rate", c2.max_hr],
-    ["Calories", c2.calories != null ? fmt(c2.calories) : null], ["Drag factor", c2.drag_factor], ["Comments", c2.comments]]) : "";
+    ["Avg power", c2.avg_watts != null ? `${c2.avg_watts} W` : null],
+    ["Calories", c2.calories != null ? fmt(c2.calories) : null], ["Drag factor", c2.drag_factor], ["Comments", c2.comments]]) +
+    splitsTable(c2.splits) : "";
   const st = w.strava;
   const stCard = st ? card("Strava", [["Name", st.name], ["Sport", st.sport],
     ["Moving time", st.moving_min != null ? `${fmt(st.moving_min, 1)} min` : null], ["Distance", st.distance_mi != null ? `${fmt(st.distance_mi, 2)} mi` : null],
