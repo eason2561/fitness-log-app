@@ -6,13 +6,13 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.04-2 (Concept2 splits)";
+const APP_VERSION = "2026.11.04-4 (bell dropdown, erg chart, treadmill climb)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
 // ------------------------------------------------------------------ state
 
-const EMPTY_BUNDLE = { workouts: [], measurements: [], daily: [], weekly: [], exercises: [], templates: [], pending_photos: [] };
+const EMPTY_BUNDLE = { workouts: [], measurements: [], daily: [], weekly: [], exercises: [], templates: [], bells: [], pending_photos: [] };
 
 function readJSON(key, fallback) {
   try {
@@ -329,7 +329,7 @@ const CARDIO_FIELDS = [
   ["duration_min", "Duration (min)", "float"], ["distance_mi", "Distance (mi)", "float"],
   ["calories", "Calories", "float"], ["avg_hr", "Avg heart rate", "int"], ["max_hr", "Max heart rate", "int"],
   ["avg_speed_mph", "Avg speed (mph)", "float"], ["incline_pct", "Incline (%)", "float"], ["level", "Level", "float"],
-  ["floors", "Floors", "float"], ["avg_watts", "Avg watts", "float"],
+  ["floors", "Floors", "float"], ["climb_ft", "Climb (ft)", "float"], ["avg_watts", "Avg watts", "float"],
 ];
 
 function lastWeightFor(exId) {
@@ -422,6 +422,20 @@ function drawEditor() {
   const exValue = (v) => esc(catalog.resolve(v) ? catalog.name(catalog.resolve(v)) : v || "");
   const num = (path, v, type = "int", attrs = "") =>
     `<input type="number" ${type === "int" ? 'inputmode="numeric" step="1"' : 'inputmode="decimal" step="any"'} min="0" data-path="${path}" data-type="${type}" value="${v ?? ""}" ${attrs}>`;
+  // Weight: a dropdown of Dave's bells (config/bells.yaml) in this workout's unit, or a number box for anything else.
+  const bells = state.bundle.bells || [];
+  const weight = (path, v, fallback = null) => {
+    if (!bells.length || state.editor.customWeight?.has(path)) {
+      return num(path, v ?? "", "float", fallback != null ? `placeholder="${fallback}"` : "");
+    }
+    const value = (b) => (unit === "kg" ? b.kg : b.lb);
+    const known = v == null || bells.some((b) => value(b) === v);
+    return `<select data-path="${path}" data-type="float" data-weight>
+      ${opt("", v, fallback != null ? `(${fmt(fallback, 1)})` : "–")}
+      ${bells.map((b) => opt(value(b), v, `${fmt(b.kg, 1)} kg · ${fmt(b.lb, 1)} lb`)).join("")}
+      ${known ? "" : opt(v, v, `${fmt(v, 1)} ${unit}`)}
+      <option value="other">Other weight…</option></select>`;
+  };
 
   const effortOpts = (p, s) => `<div class="opts">
       <label class="check"><input type="checkbox" data-path="${p}.per_side" data-type="bool" ${s.per_side ? "checked" : ""}> Per side</label>
@@ -448,7 +462,7 @@ function drawEditor() {
         ${b.stations.map((s, j) => `<div class="station"><div class="idx">${j + 1}</div><div class="fields">
             <label class="wide">Exercise<input list="exercise-list" data-path="blocks.${i}.stations.${j}.exercise" value="${exValue(s.exercise)}" autocomplete="off"></label>
             <label>Reps${num(`blocks.${i}.stations.${j}.reps`, s.reps)}</label>
-            <label>Weight (${unit})${num(`blocks.${i}.stations.${j}.weight`, s.weight, "float")}</label>
+            <label>Weight${weight(`blocks.${i}.stations.${j}.weight`, s.weight)}</label>
             ${effortOpts(`blocks.${i}.stations.${j}`, s)}</div>
             <button class="icon" data-action="remove-station" data-i="${i}" data-j="${j}" aria-label="Remove exercise" ${b.stations.length < 2 ? "disabled" : ""}>✕</button></div>`).join("")}
         <button class="ghost" data-action="add-station" data-i="${i}">+ Add exercise</button></div>`;
@@ -459,7 +473,7 @@ function drawEditor() {
         <div class="row">${effortOpts(`blocks.${i}`, b).replace('class="opts"', 'class="opts row"')}</div>
         <div class="set-row small secondary"><span></span><span>Reps</span><span>Weight (${unit})</span><span></span></div>
         ${b.sets.map((s, j) => `<div class="set-row"><span class="muted">${j + 1}</span>
-          ${num(`blocks.${i}.sets.${j}.reps`, s.reps)}${num(`blocks.${i}.sets.${j}.weight`, s.weight ?? "", "float", `placeholder="${b.weight ?? ""}"`)}
+          ${num(`blocks.${i}.sets.${j}.reps`, s.reps)}${weight(`blocks.${i}.sets.${j}.weight`, s.weight, b.weight)}
           <button class="icon" data-action="remove-set" data-i="${i}" data-j="${j}" aria-label="Remove set" ${b.sets.length < 2 ? "disabled" : ""}>✕</button></div>`).join("")}
         <button class="ghost" data-action="add-set" data-i="${i}">+ Add set</button></div>`;
     }
@@ -558,6 +572,13 @@ view.addEventListener("input", (e) => {
 view.addEventListener("change", (e) => {
   const el = e.target.closest("[data-path]");
   if (!el || !state.editor) return;
+  if (el.hasAttribute("data-weight") && el.value === "other") {
+    // swap the dropdown for a number box and put the cursor in it
+    (state.editor.customWeight ||= new Set()).add(el.dataset.path);
+    drawEditor();
+    view.querySelector(`[data-path="${el.dataset.path}"]`)?.focus();
+    return;
+  }
   setPath(state.editor.draft, el.dataset.path, readInput(el));
   persistDraft();
   if (el.hasAttribute("data-rerender")) drawEditor();
@@ -743,6 +764,45 @@ async function drawHr(pl) {
   addChart("c-hr", { type: "line", data: { datasets: [line] }, options: o });
 }
 
+// Pace and stroke rate over a Concept2 piece (data/clean/strokes/c2-<id>.json, 10-second averages).
+async function drawErg(c2) {
+  const card = document.getElementById("erg-card");
+  let d = hrCache.get(c2.stroke_file);
+  try {
+    if (!d) {
+      d = JSON.parse(await gh.getRaw(c2.stroke_file));
+      hrCache.set(c2.stroke_file, d);
+    }
+  } catch (e) {
+    if (card) card.innerHTML = `<p class="small muted">${e instanceof gh.NetworkError ? "The workout chart needs a connection." : esc(e.message)}</p>`;
+    return;
+  }
+  if (!card || !card.isConnected) return;
+  const c = themeColors();
+  const mmss = (sec) => (sec == null ? "–" : `${Math.floor(sec / 60)}:${(sec % 60).toFixed(1).padStart(4, "0")}`);
+  const at = (i) => (i * d.step_s) / 60;
+  const pace = d.pace.map((v, i) => ({ x: at(i), y: v }));
+  const spm = d.spm.map((v, i) => ({ x: at(i), y: v }));
+  const vals = d.pace.filter((v) => v != null).sort((a, b) => a - b);
+  // keep the pace axis on the steady part of the piece; the first strokes from a standstill are much slower
+  const lo = vals[0], hi = vals[Math.floor(vals.length * 0.97)] ?? vals.at(-1);
+  card.innerHTML = `<p class="small muted">Pace per ${d.per} m (faster is higher) and stroke rate, in 10-second averages.</p>
+    <div class="chart-box"><canvas id="c-erg" role="img" aria-label="Pace and stroke rate over the workout"></canvas></div>`;
+  const o = baseOptions(c, { legend: true });
+  o.scales.x = { ...o.scales.x, type: "linear", min: 0, max: pace.length ? pace.at(-1).x : 1,
+    ticks: { ...o.scales.x.ticks, callback: (v) => `${Math.round(v)} min` } };
+  o.scales.y = { ...o.scales.y, beginAtZero: false, reverse: true, min: Math.floor(lo - 2), max: Math.ceil(hi + 2),
+    ticks: { ...o.scales.y.ticks, callback: (v) => mmss(v) } };
+  o.scales.y2 = { position: "right", beginAtZero: false, grid: { display: false }, border: { display: false },
+    ticks: { color: c.muted } };
+  o.plugins.tooltip.callbacks = {
+    title: (items) => { const t = Math.round(items[0].parsed.x * 60); return `${Math.floor(t / 60)}:${pad(t % 60)}`; },
+    label: (ctx) => (ctx.dataset.yAxisID === "y2" ? `${ctx.parsed.y} spm` : `${mmss(ctx.parsed.y)} /${d.per} m · ${d.watts[ctx.dataIndex] ?? "–"} W`),
+  };
+  const line = (label, pts, color, axis) => ({ ...lineDataset(c, label, pts, color), yAxisID: axis, pointRadius: 0, pointHoverRadius: 4, spanGaps: false });
+  addChart("c-erg", { type: "line", data: { datasets: [line("Pace", pace, c.s1, "y"), line("Stroke rate", spm, c.s2, "y2")] }, options: o });
+}
+
 // Splits or intervals from the Concept2 monitor (src/fitlog/concept2.py splits()).
 function splitsTable(splits) {
   if (!splits?.length) return "";
@@ -782,6 +842,7 @@ function renderWorkout(_params, [id]) {
     ["Pace", c2.pace], ["Stroke rate", c2.stroke_rate], ["Avg heart rate", c2.avg_hr], ["Max heart rate", c2.max_hr],
     ["Avg power", c2.avg_watts != null ? `${c2.avg_watts} W` : null],
     ["Calories", c2.calories != null ? fmt(c2.calories) : null], ["Drag factor", c2.drag_factor], ["Comments", c2.comments]]) +
+    (c2.stroke_file ? `<h3>Pace and stroke rate</h3><div class="card" id="erg-card"><p class="small muted">Loading the workout chart…</p></div>` : "") +
     splitsTable(c2.splits) : "";
   const st = w.strava;
   const stCard = st ? card("Strava", [["Name", st.name], ["Sport", st.sport],
@@ -800,6 +861,7 @@ function renderWorkout(_params, [id]) {
       <p class="small muted">Recorded with ${name}. Add the sets or machine numbers and they'll be saved together with this session.</p>
       <div class="row"><a class="btn primary" href="#/edit?${key}=${encodeURIComponent(w[key][`${key}_id`])}">Add workout details</a></div>`;
     if (hrSrc) drawHr(hrSrc);
+    if (c2?.stroke_file) drawErg(c2);
     return;
   }
   view.innerHTML = `
@@ -823,6 +885,7 @@ function renderWorkout(_params, [id]) {
       <a class="btn" href="${esc(repoUrl(workoutPath(w.id)))}" target="_blank" rel="noopener">View file on GitHub</a>
     </div>`;
   if (hrSrc) drawHr(hrSrc);
+  if (c2?.stroke_file) drawErg(c2);
   document.getElementById("del-btn").onclick = async (e) => {
     if (!confirm(`Delete "${w.title}" on ${w.date}? This removes the file from the repo (git history keeps a copy).`)) return;
     e.target.disabled = true;
