@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.10.04-2 (Fitbit sleep, steps, resting HR, HRV)";
+const APP_VERSION = "2026.11.04-1 (Strava and Concept2)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -46,6 +46,8 @@ function allWorkouts() {
   for (const [id, w] of Object.entries(state.local.workouts)) {
     byId.set(id, w);
     if (w.links?.polar_exercise_id) byId.delete(`polar-${w.links.polar_exercise_id}`);
+    if (w.links?.concept2_result_id) byId.delete(`concept2-${w.links.concept2_result_id}`);
+    if (w.links?.strava_activity_id) byId.delete(`strava-${w.links.strava_activity_id}`);
   }
   return [...byId.values()].sort((a, b) =>
     (b.date + (b.start || "")).localeCompare(a.date + (a.start || "")));
@@ -155,14 +157,21 @@ function statLine(w) {
     if (c.distance_mi) parts.push(`${fmt(c.distance_mi, 2)} mi`);
     if (c.calories) parts.push(`${fmt(c.calories)} cal`);
   }
-  if (w.polar?.avg_hr) parts.push(`avg HR ${w.polar.avg_hr}`);
-  if (w.polar?.calories && !(w.cardio || []).some((c) => c.calories)) parts.push(`${fmt(w.polar.calories)} cal`);
+  if (!(w.cardio || []).some((c) => c.distance_mi) && synced(w, "distance_mi")) parts.push(`${fmt(synced(w, "distance_mi"), 2)} mi`);
+  if (synced(w, "avg_hr")) parts.push(`avg HR ${synced(w, "avg_hr")}`);
+  if (synced(w, "calories") && !(w.cardio || []).some((c) => c.calories)) parts.push(`${fmt(synced(w, "calories"))} cal`);
   return parts.join(" · ");
 }
 
+// Devices and services a workout's data came from, in order of preference (same order as build._first).
+const SYNCED = [["polar", "Polar"], ["concept2", "Concept2"], ["strava", "Strava"]];
+const SYNCED_SOURCES = SYNCED.map(([k]) => k);
+const synced = (w, field) => SYNCED.map(([k]) => w[k]?.[field]).find((v) => v != null) ?? null;
+const syncedBadges = (w) => SYNCED.filter(([k]) => w[k]).map(([, name]) => `<span class="badge">${name}</span>`).join(" ");
+
 function workoutItem(w) {
   return `<li><a href="#/workout/${encodeURIComponent(w.id)}">
-    <span><strong>${esc(w.title)}</strong> ${w.pending ? '<span class="badge">syncing</span>' : ""}${w.polar ? '<span class="badge">Polar</span>' : ""}<br>
+    <span><strong>${esc(w.title)}</strong> ${w.pending ? '<span class="badge">syncing</span>' : ""}${syncedBadges(w)}<br>
     <span class="meta">${esc(statLine(w))}</span></span>
     <span class="meta num">${shortDate(w.date)}${w.start ? `<br>${esc(w.start)}` : ""}</span></a></li>`;
 }
@@ -288,7 +297,7 @@ function renderHome() {
 function renderNew() {
   const ws = allWorkouts();
   const seen = new Set();
-  const recent = ws.filter((w) => w.type !== "cardio" && w.source !== "polar" && !seen.has(w.title) && seen.add(w.title)).slice(0, 3);
+  const recent = ws.filter((w) => w.type !== "cardio" && !SYNCED_SOURCES.includes(w.source) && !seen.has(w.title) && seen.add(w.title)).slice(0, 3);
   view.innerHTML = `
     ${setupNotice()}
     <h1>Log a workout</h1>
@@ -314,8 +323,8 @@ view.addEventListener("click", (e) => {
 
 const DRAFT_KEY = "fitlog:draft";
 const EVERY_OPTIONS = [30, 45, 60, 90, 120, 150, 180, 240, 300];
-const MACHINES = ["treadmill", "elliptical", "upright_bike", "recumbent_bike", "stair_climber", "rower", "bike_erg", "outdoor_walk", "other"];
-const machineName = (m) => ({ bike_erg: "BikeErg" })[m] || m.replace(/_/g, " ");
+const MACHINES = ["treadmill", "elliptical", "upright_bike", "recumbent_bike", "stair_climber", "rower", "bike_erg", "ski_erg", "outdoor_walk", "other"];
+const machineName = (m) => ({ bike_erg: "BikeErg", ski_erg: "SkiErg" })[m] || m.replace(/_/g, " ");
 const CARDIO_FIELDS = [
   ["duration_min", "Duration (min)", "float"], ["distance_mi", "Distance (mi)", "float"],
   ["calories", "Calories", "float"], ["avg_hr", "Avg heart rate", "int"], ["max_hr", "Max heart rate", "int"],
@@ -376,6 +385,15 @@ async function renderEditor(params) {
         links: { polar_exercise_id: params.polar },
         blocks: [newBlock(p.type === "cardio" ? "cardio" : "interval")] };
       if (/WALK|HIK/.test(p.polar.sport || "")) draft.blocks[0].machine = "outdoor_walk";
+    } else if (params.concept2 || params.strava) {
+      const [key, link] = params.concept2 ? ["concept2", "concept2_result_id"] : ["strava", "strava_activity_id"];
+      const p = allWorkouts().find((x) => x[key]?.[`${key}_id`] === params[key]);
+      if (!p) throw new Error("That session isn't loaded yet. Reload data and try again.");
+      draft = { date: p.date, start: p.start, type: p.type === "strength" ? "kettlebell" : p.type === "cardio" ? "cardio" : "kettlebell",
+        title: key === "concept2" ? p.title : "", links: { [link]: params[key] },
+        blocks: [newBlock(p.type === "cardio" ? "cardio" : "interval")] };
+      if (key === "concept2") Object.assign(draft.blocks[0], p.cardio?.[0] || {}, { kind: "cardio" });
+      else if (/Walk|Hike/.test(p.strava.sport || "")) draft.blocks[0].machine = "outdoor_walk";
     } else if (params.photo) {
       draft = { date: params.date || localIsoDate(), start: params.start || nowTime(), type: "cardio", title: "Cardio",
         source: "machine_photo", links: { photo: params.photo }, blocks: [newBlock("cardio")] };
@@ -474,6 +492,8 @@ function drawEditor() {
     <div class="card"><label>Notes<textarea data-path="notes" placeholder="How did it feel?">${esc(d.notes || "")}</textarea></label></div>
     ${d.links?.photo ? `<p class="small muted">Linked photo: ${esc(d.links.photo)}</p>` : ""}
     ${d.links?.polar_exercise_id ? `<p class="small muted">Linked to Polar session ${esc(d.links.polar_exercise_id)}: its heart rate and calories will show with this workout.</p>` : ""}
+    ${d.links?.concept2_result_id ? `<p class="small muted">Linked to Concept2 result ${esc(d.links.concept2_result_id)}.</p>` : ""}
+    ${d.links?.strava_activity_id ? `<p class="small muted">Linked to Strava activity ${esc(d.links.strava_activity_id)}.</p>` : ""}
     <div class="summary-bar"><div class="stats" id="live-summary"></div>
       <div class="row">${origin.path ? `<a class="btn" href="#/workout/${encodeURIComponent(origin.path.split("/").pop().replace(".yaml", ""))}">Cancel</a>` : ""}
       <button class="primary" data-action="save">Save</button></div></div>
@@ -742,17 +762,31 @@ function renderWorkout(_params, [id]) {
     ["Training load", pl.training_load != null ? fmt(pl.training_load, 1) : null],
     ["Distance", pl.distance_mi != null ? `${fmt(pl.distance_mi, 2)} mi` : null], ["Note", pl.note], ["Device", pl.device]]
     .filter(([, v]) => v != null && v !== "") : [];
-  const polarCard = pl ? `<h2>Polar</h2><div class="card"><table>${polarRows.map(([k, v]) =>
-    `<tr><th>${esc(k)}</th><td class="r">${esc(v)}</td></tr>`).join("")}</table></div>` : "";
-  if (w.source === "polar") {
+  const card = (title, rows) => `<h2>${title}</h2><div class="card"><table>${rows.filter(([, v]) => v != null && v !== "").map(([k, v]) =>
+    `<tr><th>${esc(k)}</th><td class="r">${esc(v)}</td></tr>`).join("")}</table></div>`;
+  const polarCard = pl ? card("Polar", polarRows) : "";
+  const c2 = w.concept2;
+  const c2Card = c2 ? card("Concept2 Logbook", [["Machine", (c2.machine || "").replace(/_/g, " ")],
+    ["Time", c2.duration_min != null ? `${fmt(c2.duration_min, 1)} min` : null], ["Distance", c2.meters != null ? `${fmt(c2.meters)} m` : null],
+    ["Pace", c2.pace], ["Stroke rate", c2.stroke_rate], ["Avg heart rate", c2.avg_hr], ["Max heart rate", c2.max_hr],
+    ["Calories", c2.calories != null ? fmt(c2.calories) : null], ["Drag factor", c2.drag_factor], ["Comments", c2.comments]]) : "";
+  const st = w.strava;
+  const stCard = st ? card("Strava", [["Name", st.name], ["Sport", st.sport],
+    ["Moving time", st.moving_min != null ? `${fmt(st.moving_min, 1)} min` : null], ["Distance", st.distance_mi != null ? `${fmt(st.distance_mi, 2)} mi` : null],
+    ["Elevation gain", st.elevation_ft != null ? `${fmt(st.elevation_ft)} ft` : null], ["Avg heart rate", st.avg_hr], ["Max heart rate", st.max_hr],
+    ["Calories", st.calories != null ? fmt(st.calories) : null], ["Avg power", st.avg_watts != null ? `${st.avg_watts} W` : null], ["Device", st.device]]
+    ) + `<p class="small"><a href="https://www.strava.com/activities/${encodeURIComponent(st.strava_id)}" target="_blank" rel="noopener">Open on Strava</a></p>` : "";
+  const hrSrc = [pl, c2, st].find((b) => b?.hr_file);
+  const sourceCards = polarCard + c2Card + stCard + (hrSrc ? hrCardHTML() : "");
+  if (SYNCED_SOURCES.includes(w.source)) {
+    const [key, name] = SYNCED.find(([k]) => k === w.source);
     view.innerHTML = `
-      <h1>${esc(w.title)} <span class="badge">Polar</span></h1>
+      <h1>${esc(w.title)} ${syncedBadges(w)}</h1>
       <p class="secondary">${longDate(w.date)}${w.start ? ` · ${esc(w.start)}` : ""}</p>
-      ${polarCard}
-      ${pl.hr_file ? hrCardHTML() : ""}
-      <p class="small muted">Recorded with Polar. Add the sets or machine numbers and they'll be saved together with this session.</p>
-      <div class="row"><a class="btn primary" href="#/edit?polar=${encodeURIComponent(pl.polar_id)}">Add workout details</a></div>`;
-    if (pl.hr_file) drawHr(pl);
+      ${sourceCards}
+      <p class="small muted">Recorded with ${name}. Add the sets or machine numbers and they'll be saved together with this session.</p>
+      <div class="row"><a class="btn primary" href="#/edit?${key}=${encodeURIComponent(w[key][`${key}_id`])}">Add workout details</a></div>`;
+    if (hrSrc) drawHr(hrSrc);
     return;
   }
   view.innerHTML = `
@@ -767,8 +801,7 @@ function renderWorkout(_params, [id]) {
     ${exRows ? `<h2>Exercises</h2><div class="card table-wrap"><table><thead><tr><th>Exercise</th><th class="r">Reps</th>
       <th class="r">Heaviest (lb)</th><th class="r">Volume (lb)</th></tr></thead><tbody>${exRows}</tbody></table></div>` : ""}
     ${cardio}
-    ${polarCard}
-    ${pl?.hr_file ? hrCardHTML() : ""}
+    ${sourceCards}
     ${w.notes ? `<h2>Notes</h2><div class="card">${esc(w.notes)}</div>` : ""}
     <div class="row">
       <a class="btn" href="#/edit?id=${encodeURIComponent(w.id)}">Edit</a>
@@ -776,7 +809,7 @@ function renderWorkout(_params, [id]) {
       <button class="danger" id="del-btn">Delete</button>
       <a class="btn" href="${esc(repoUrl(workoutPath(w.id)))}" target="_blank" rel="noopener">View file on GitHub</a>
     </div>`;
-  if (pl?.hr_file) drawHr(pl);
+  if (hrSrc) drawHr(hrSrc);
   document.getElementById("del-btn").onclick = async (e) => {
     if (!confirm(`Delete "${w.title}" on ${w.date}? This removes the file from the repo (git history keeps a copy).`)) return;
     e.target.disabled = true;
@@ -1289,12 +1322,12 @@ function minutesBuckets(ws, from, to) {
 
 function workoutCalories(w) {
   const machine = (w.cardio || []).reduce((a, c) => a + (Number(c.calories) || 0), 0);
-  return machine || w.polar?.calories || null;
+  return machine || synced(w, "calories");
 }
 
 function workoutDistance(w) {
   const machine = (w.cardio || []).reduce((a, c) => a + (Number(c.distance_mi) || 0), 0);
-  return machine || w.polar?.distance_mi || null;
+  return machine || synced(w, "distance_mi");
 }
 
 function renderReport(params) {
@@ -1327,7 +1360,7 @@ function renderReport(params) {
       "Training minutes chart", daily ? "Training minutes per day" : "Training minutes per week (weeks start Monday)")}
     ${reportTable(["Date", "Start", "Workout", "Minutes", "Reps", "Volume (lb)", "Distance (mi)", "Avg HR", "Calories"],
       ws.map((w) => [w.date, w.start || "–", w.title, fmt(w.duration_min, 1), fmt(w.total_reps || null), fmt(w.volume_lb || null),
-        fmt(workoutDistance(w), 2), w.polar?.avg_hr ?? "–", fmt(workoutCalories(w))]),
+        fmt(workoutDistance(w), 2), synced(w, "avg_hr") ?? "–", fmt(workoutCalories(w))]),
       [`${ws.length} workout${ws.length === 1 ? "" : "s"}`, "", "", fmt(r1(sum("duration_min")), 1), fmt(sum("total_reps")),
         fmt(r1(sum("volume_lb"))), fmt(ws.reduce((a, w) => a + (workoutDistance(w) || 0), 0) || null, 2), "",
         fmt(ws.reduce((a, w) => a + (workoutCalories(w) || 0), 0) || null)], "lll")}` :
@@ -1756,6 +1789,29 @@ async function renderSettings() {
       <p class="field-hint">Sleep, steps, resting heart rate and HRV through the Google Health API. Setup: README → Fitbit.</p>
       <p id="fitbit-status" class="small"></p>
     </div>
+    <h2>Concept2 Logbook</h2>
+    <div class="card stack">
+      ${syncedStatus("concept2", "result")}
+      <label>Concept2 client ID<input id="concept2-client" value="${esc(s.concept2ClientId || "")}" autocapitalize="off" placeholder="from log.concept2.com/developers/keys"></label>
+      <div class="row">
+        <button type="button" id="concept2-connect">${syncedCount("concept2") ? "Reconnect Concept2" : "Connect Concept2"}</button>
+        <button type="button" id="concept2-sync">Sync Concept2 now</button>
+      </div>
+      <p class="field-hint">RowErg, SkiErg and BikeErg results from the Logbook (ErgData uploads them). Setup: README → Concept2.</p>
+      <p id="concept2-status" class="small"></p>
+    </div>
+    <h2>Strava</h2>
+    <div class="card stack">
+      ${syncedStatus("strava", "activity", "activities")}
+      <label>Strava client ID<input id="strava-client" value="${esc(s.stravaClientId || "")}" autocapitalize="off" placeholder="from strava.com/settings/api"></label>
+      <div class="row">
+        <button type="button" id="strava-connect">${syncedCount("strava") ? "Reconnect Strava" : "Connect Strava"}</button>
+        <button type="button" id="strava-sync">Sync Strava now</button>
+      </div>
+      <p class="field-hint">Leave <strong>View data about your private activities</strong> ticked when Strava asks.
+        Activities Polar or Concept2 already sent are merged, not doubled.</p>
+      <p id="strava-status" class="small"></p>
+    </div>
     <h2>Waiting to sync</h2>
     <div class="card">${ops.length ? `<ul class="list">${ops.map((o) => `<li><div class="item"><span>${esc(o.message)}<br>
         <span class="meta">${esc(o.path)}</span>${o.error ? `<br><span class="small notice error">${esc(o.error)}</span>` : ""}</span>
@@ -1857,6 +1913,37 @@ async function renderSettings() {
       e.target.disabled = false;
     }
   };
+  const startOAuth = (service, settingKey, url, params) => {
+    const clientId = document.getElementById(`${service}-client`).value.trim();
+    if (!clientId) return toast("Enter the client ID first.");
+    gh.saveSettings({ ...gh.loadSettings(), [settingKey]: clientId });
+    const stateTag = `${service}-${Math.random().toString(36).slice(2, 10)}`;
+    sessionStorage.setItem("fitlog:oauthState", stateTag);
+    try { localStorage.setItem("fitlog:oauthState", stateTag); } catch {}
+    location.href = `${url}?${new URLSearchParams({ client_id: clientId, response_type: "code", redirect_uri: appRedirectUri(), ...params, state: stateTag })}`;
+  };
+  const syncButton = (service, file, name, what) => {
+    const out = document.getElementById(`${service}-status`);
+    document.getElementById(`${service}-sync`).onclick = async (e) => {
+      e.target.disabled = true;
+      out.textContent = "Starting sync…";
+      try {
+        await gh.dispatchWorkflow(file);
+        out.textContent = `Sync started. New ${what} appear in about a minute (use Reload data).`;
+      } catch (err) {
+        out.innerHTML = workflowHelp(err, file, name);
+      } finally {
+        e.target.disabled = false;
+      }
+    };
+  };
+  // Scopes: same as SCOPE in src/fitlog/concept2.py and src/fitlog/strava.py.
+  document.getElementById("concept2-connect").onclick = () => startOAuth("concept2", "concept2ClientId",
+    "https://log.concept2.com/oauth/authorize", { scope: "user:read,results:read" });
+  document.getElementById("strava-connect").onclick = () => startOAuth("strava", "stravaClientId",
+    "https://www.strava.com/oauth/authorize", { scope: "read,activity:read_all", approval_prompt: "auto" });
+  syncButton("concept2", "concept2-sync.yml", "Sync Concept2", "results");
+  syncButton("strava", "strava-sync.yml", "Sync Strava", "activities");
   document.getElementById("s-refresh").onclick = () => refresh().then(() => toast("Data reloaded."));
   document.getElementById("s-sync")?.addEventListener("click", () => syncNow().then(renderSettings));
   view.querySelectorAll("[data-discard]").forEach((b) => (b.onclick = async () => {
@@ -1885,6 +1972,14 @@ function polarStatus() {
   if (!ps.length) return `<p class="small secondary">Not connected yet, or no sessions synced.</p>`;
   const last = ps.map((w) => w.date).sort().at(-1);
   return `<p class="small secondary">${ps.length} Polar session${ps.length === 1 ? "" : "s"} synced · latest ${esc(shortDate(last))}</p>`;
+}
+
+const syncedCount = (key) => state.bundle.workouts.filter((w) => w[key]).length;
+
+function syncedStatus(key, one, many = `${one}s`) {
+  const ws = state.bundle.workouts.filter((w) => w[key]);
+  if (!ws.length) return `<p class="small secondary">Not connected yet, or nothing synced.</p>`;
+  return `<p class="small secondary">${ws.length} ${ws.length === 1 ? one : many} synced · latest ${esc(shortDate(ws.map((w) => w.date).sort().at(-1)))}</p>`;
 }
 
 function withingsReadings() {
@@ -1922,7 +2017,7 @@ function workflowHelp(err, file, name) {
   return `${why} You can run it on GitHub instead: <a href="${esc(url)}" target="_blank" rel="noopener">Actions → ${esc(name)} → Run workflow</a>.`;
 }
 
-// Polar, Withings and Google (Fitbit) send you back here as ?code=…&state=<service>-… after you approve access.
+// Polar, Withings, Google (Fitbit), Concept2 and Strava send you back here as ?code=…&state=<service>-… after you approve access.
 async function handleOAuthReturn() {
   const q = new URLSearchParams(location.search);
   const code = q.get("code");
@@ -1940,7 +2035,13 @@ async function handleOAuthReturn() {
     try { localStorage.removeItem(k); } catch {}
   }
   const tag = returned || expected || "polar";
-  const service = tag.startsWith("withings") ? "Withings" : tag.startsWith("fitbit") ? "Fitbit" : "Polar";
+  const service = { withings: "Withings", fitbit: "Fitbit", concept2: "Concept2", strava: "Strava" }[tag.split("-")[0]] || "Polar";
+  if (service === "Strava" && !(q.get("scope") || "").includes("activity:read")) {
+    view.innerHTML = `<h1>Strava needs activity access</h1><div class="card stack"><p>Strava was connected without permission to
+      read your activities. Tap <strong>Connect Strava</strong> again and leave both activity boxes ticked.</p>
+      <a class="btn" href="#/settings">Back to Settings</a></div>`;
+    return;
+  }
   if (!gh.isConfigured()) {
     // Usually: the Withings/Polar phone app handled the sign-in and opened this page in its own
     // built-in browser, which doesn't have your GitHub token.
@@ -1952,8 +2053,8 @@ async function handleOAuthReturn() {
         keeps taking over on the phone, the PC is the easiest way; you only need to do this once.</p></div>`;
     return;
   }
-  const file = { Withings: "withings-connect.yml", Fitbit: "fitbit-connect.yml", Polar: "polar-connect.yml" }[service];
-  const inputs = service === "Polar" ? { code } : { code, redirect_uri: appRedirectUri() };
+  const file = `${service.toLowerCase()}-connect.yml`;
+  const inputs = service === "Polar" || service === "Strava" ? { code } : { code, redirect_uri: appRedirectUri() };
   state.hold = true; // keep this message up even if a data refresh finishes meanwhile
   view.innerHTML = `<h1>Connecting ${service}…</h1><div class="card"><p id="pc-msg">Starting the Connect ${service} workflow…</p></div>`;
   const msg = document.getElementById("pc-msg");
@@ -1974,7 +2075,7 @@ async function handleOAuthReturn() {
       <span class="small muted">(${esc(err.message)})</span><br><br>
       Paste this code as the <strong>code</strong> input right away:<br>
       <input readonly value="${esc(code)}" aria-label="Authorization code">
-      ${service !== "Polar" ? `<br>and this as <strong>redirect_uri</strong>:<br><input readonly value="${esc(appRedirectUri())}" aria-label="Redirect URI">` : ""}
+      ${inputs.redirect_uri ? `<br>and this as <strong>redirect_uri</strong>:<br><input readonly value="${esc(appRedirectUri())}" aria-label="Redirect URI">` : ""}
       <br><br><a class="btn" href="#/settings">Back to Settings</a>`;
   }
 }
