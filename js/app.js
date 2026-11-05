@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.04-4 (bell dropdown, erg chart, treadmill climb)";
+const APP_VERSION = "2026.11.05-1 (Omron .xlsx reports)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -1569,8 +1569,8 @@ function renderMeasure(params) {
         <p class="small secondary">In OMRON connect: <strong>History → Share → CSV</strong> (or the graph screen's ⋯ →
           <strong>Export measurement data</strong>) and save the file. Then pick it here. Overlapping exports and
           readings you already typed in are de-duplicated.</p>
-        <label class="btn" for="omron-file">Import Omron CSV</label>
-        <input id="omron-file" type="file" accept=".csv,text/csv,text/comma-separated-values" hidden>
+        <label class="btn" for="omron-file">Import Omron export</label>
+        <input id="omron-file" type="file" accept=".csv,.xlsx,text/csv,text/comma-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden>
         <p id="omron-status" class="small"></p>
       </div>` : ""}
     ${kind === "fasting" ? `<p class="small muted">Fasting days show as markers on the body weight chart in Progress.</p>` : ""}`;
@@ -1614,27 +1614,32 @@ async function importOmron(file) {
   const status = document.getElementById("omron-status");
   if (!file) return;
   const bytes = new Uint8Array(await file.arrayBuffer());
-  const text = new TextDecoder().decode(bytes);
-  const lines = text.split(/\r?\n/);
-  const headerAt = lines.findIndex((l) => /sys/i.test(l));
-  if (headerAt < 0) {
-    status.textContent = "That doesn't look like an OMRON connect CSV export (no systolic column).";
-    status.className = "small notice error";
-    return;
+  // The emailed report is an Excel file (a zip; the build reads it). A CSV is checked here.
+  const isXlsx = /\.xlsx$/i.test(file.name) || (bytes[0] === 0x50 && bytes[1] === 0x4b);
+  let count = null;
+  if (!isXlsx) {
+    const lines = new TextDecoder().decode(bytes).split(/\r?\n/);
+    const headerAt = lines.findIndex((l) => /sys/i.test(l));
+    if (headerAt < 0) {
+      status.textContent = "That doesn't look like an OMRON connect export (no systolic column).";
+      status.className = "small notice error";
+      return;
+    }
+    count = lines.slice(headerAt + 1).filter((l) => /\d/.test(l) && l.split(",").length >= 3).length;
   }
-  const count = lines.slice(headerAt + 1).filter((l) => /\d/.test(l) && l.split(",").length >= 3).length;
+  const what = count == null ? "the OMRON report" : `${count} reading${count === 1 ? "" : "s"}`;
   const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].slice(0, 4)
     .map((b) => b.toString(16).padStart(2, "0")).join("");
   const d = new Date();
   const stamp = `${localIsoDate(d)}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-  status.textContent = `Uploading ${count} reading${count === 1 ? "" : "s"}…`;
+  status.textContent = `Uploading ${what}…`;
   status.className = "small";
   try {
-    const { queued } = await outbox.perform([{ op: "put", path: `data/raw/omron/${stamp}-${digest}.csv`,
-      content: gh.bytesToBase64(bytes), message: `Import Omron export (${count} readings) (app)` }]);
+    const { queued } = await outbox.perform([{ op: "put", path: `data/raw/omron/${stamp}-${digest}.${isXlsx ? "xlsx" : "csv"}`,
+      content: gh.bytesToBase64(bytes), message: `Import Omron export (${what}) (app)` }]);
     status.textContent = queued
       ? "Saved on this device; it will upload when you're online."
-      : `Uploaded the export (about ${count} reading${count === 1 ? "" : "s"}). They'll appear in about a minute (Settings → Reload data).`;
+      : `Uploaded ${what}. The readings appear in about a minute (Settings → Reload data).`;
   } catch (err) {
     status.textContent = err.message;
     status.className = "small notice error";
