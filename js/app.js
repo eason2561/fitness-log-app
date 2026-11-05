@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug, distanceKind } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.05-10 (no broken dates or entries)";
+const APP_VERSION = "2026.11.05-12 (data source check; shorter history lines)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -29,6 +29,8 @@ function writeJSON(key, value) {
 
 const state = {
   bundle: readJSON("fitlog:bundle", EMPTY_BUNDLE),
+  // The daily data-source check (data/clean/health.json, written by fitlog health).
+  health: readJSON("fitlog:health", null),
   // Saved from this device but not yet in bundle.json (the GitHub Action rebuilds it in ~1 min).
   local: readJSON("fitlog:local", { workouts: {}, deleted: {}, measurements: {}, yaml: {} }),
   loading: false,
@@ -109,6 +111,12 @@ async function refresh({ quiet = false } = {}) {
     writeJSON("fitlog:bundle", state.bundle);
     writeJSON("fitlog:refreshedAt", Date.now());
     catalog = new Catalog(state.bundle.exercises);
+    try {
+      state.health = JSON.parse(await gh.getRaw("data/clean/health.json"));
+      writeJSON("fitlog:health", state.health);
+    } catch {
+      // not checked yet, or offline: keep the last one
+    }
     state.setRows = null;
     reconcile();
   } catch (e) {
@@ -160,7 +168,7 @@ function statLine(w) {
   const dist = distanceText(w);
   if (dist) parts.push(dist);
   const hr = sv(w, "avg_hr") ?? synced(w, "avg_hr");
-  if (hr) parts.push(`avg HR ${hr}`);
+  if (hr) parts.push(`HR ${hr}`);
   const cal = calorieRange(w);
   if (cal) parts.push(`${cal} cal`);
   // Each item stays whole; lines break only between items (Dave, 2026-11-04).
@@ -316,6 +324,7 @@ function renderHome() {
   view.innerHTML = `
     ${setupNotice()}
     ${state.loadError ? `<div class="notice error">${esc(state.loadError)}</div>` : ""}
+    ${healthNotice()}
     <h1>This week</h1>
     <div class="grid-tiles">
       ${tile("Sessions", cur.sessions, prev.sessions)}
@@ -2032,6 +2041,8 @@ async function renderSettings() {
         Activities Polar or Concept2 already sent are merged, not doubled.</p>
       <p id="strava-status" class="small"></p>
     </div>
+    <h2>Data sources</h2>
+    <div class="card stack">${healthList()}</div>
     <h2>Waiting to sync</h2>
     <div class="card">${ops.length ? `<ul class="list">${ops.map((o) => `<li><div class="item"><span>${esc(o.message)}<br>
         <span class="meta">${esc(o.path)}</span>${o.error ? `<br><span class="small notice error">${esc(o.error)}</span>` : ""}</span>
@@ -2192,6 +2203,32 @@ function polarStatus() {
   if (!ps.length) return `<p class="small secondary">Not connected yet, or no sessions synced.</p>`;
   const last = ps.map((w) => w.date).sort().at(-1);
   return `<p class="small secondary">${ps.length} Polar session${ps.length === 1 ? "" : "s"} synced · latest ${esc(shortDate(last))}</p>`;
+}
+
+// Home banner when the daily check found something to fix.
+function healthNotice() {
+  const h = state.health;
+  if (!h || h.ok) return "";
+  return `<div class="notice error"><strong>A data source needs attention.</strong>${h.problems.map((p) =>
+    `<br>${esc(p.source)}: ${esc(p.message)} <span class="small">Fix: ${esc(p.fix)}</span>`).join("")}
+    <br><a href="#/settings">Settings</a></div>`;
+}
+
+// Settings: each source as of the daily check.
+function healthList() {
+  const h = state.health;
+  if (!h) return `<p class="small muted">Not checked yet. The check runs every morning after the syncs (Actions → Check data sources).</p>`;
+  const bad = new Set(h.problems.map((p) => p.source));
+  const rows = Object.entries(h.sources).map(([name, s]) => {
+    let status;
+    if (name === "Photos") status = s.waiting ? `${s.waiting} waiting to be read (the desk reads them)` : "none waiting";
+    else if (!s.connected) status = "not connected";
+    else if (bad.has(name)) status = "needs attention";
+    else status = `working${s.latest ? ` · latest ${shortDate(s.latest)}` : ""}`;
+    return `<tr><th>${esc(name)}</th><td class="r ${bad.has(name) ? "notice-text" : ""}">${esc(status)}</td></tr>`;
+  }).join("");
+  return `<table>${rows}</table>${h.problems.map((p) => `<p class="small notice error">${esc(p.source)}: ${esc(p.message)}<br>Fix: ${esc(p.fix)}</p>`).join("")}
+    <p class="small muted">Checked ${esc(new Date(h.checked_at).toLocaleString())}. Problems also open a GitHub issue, which GitHub emails you.</p>`;
 }
 
 const syncedCount = (key) => state.bundle.workouts.filter((w) => w[key]).length;
