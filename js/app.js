@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.05-1 (Omron .xlsx reports)";
+const APP_VERSION = "2026.11.05-2 (your kettlebells, with photos)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -429,12 +429,14 @@ function drawEditor() {
       return num(path, v ?? "", "float", fallback != null ? `placeholder="${fallback}"` : "");
     }
     const value = (b) => (unit === "kg" ? b.kg : b.lb);
-    const known = v == null || bells.some((b) => value(b) === v);
-    return `<select data-path="${path}" data-type="float" data-weight>
+    const label = (b) => b.name || (b.marked === "lb" ? `${fmt(b.lb, 1)} lb · ${fmt(b.kg, 1)} kg` : `${fmt(b.kg, 1)} kg · ${fmt(b.lb, 1)} lb`);
+    const chosen = bells.find((b) => value(b) === v);
+    return `<span class="bell-pick"><select data-path="${path}" data-type="float" data-weight data-rerender>
       ${opt("", v, fallback != null ? `(${fmt(fallback, 1)})` : "–")}
-      ${bells.map((b) => opt(value(b), v, `${fmt(b.kg, 1)} kg · ${fmt(b.lb, 1)} lb`)).join("")}
-      ${known ? "" : opt(v, v, `${fmt(v, 1)} ${unit}`)}
-      <option value="other">Other weight…</option></select>`;
+      ${bells.map((b) => opt(value(b), v, label(b))).join("")}
+      ${v == null || chosen ? "" : opt(v, v, `${fmt(v, 1)} ${unit}`)}
+      <option value="other">Other weight…</option></select>
+      ${chosen?.photo ? `<img class="bell-thumb" src="${esc(chosen.photo)}" alt="${esc(label(chosen))}">` : ""}</span>`;
   };
 
   const effortOpts = (p, s) => `<div class="opts">

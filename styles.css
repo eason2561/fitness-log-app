@@ -261,3 +261,8 @@ details summary { cursor: pointer; color: var(--accent); font-size: 0.85rem; mar
   .report thead { display: table-header-group; }
   .report tfoot { display: table-row-group; }
 }
+
+/* Kettlebell picker: the dropdown with a photo of the chosen bell */
+.bell-pick { display: flex; gap: 8px; align-items: center; }
+.bell-pick select { flex: 1; min-width: 0; }
+.bell-thumb { width: 40px; height: 40px; object-fit: cover; border-radius: 8px; flex: none; }
