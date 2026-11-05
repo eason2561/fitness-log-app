@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.05-3 (one summary per workout, photos)";
+const APP_VERSION = "2026.11.05-5 (bike and treadmill miles, week comparison)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -220,6 +220,7 @@ const routes = {
   history: renderHistory,
   progress: renderProgress,
   report: renderReport,
+  compare: renderCompare,
   measure: renderMeasure,
   photo: renderPhoto,
   settings: renderSettings,
@@ -233,7 +234,7 @@ function route() {
   state.charts = [];
   if (name !== "edit") state.editor = null;
   document.title = "Fitness Log";
-  const tab = { "": "home", workout: "history", measure: "home", photo: "home", edit: "new", report: "progress" }[name] ?? name;
+  const tab = { "": "home", workout: "history", measure: "home", photo: "home", edit: "new", report: "progress", compare: "home" }[name] ?? name;
   document.querySelectorAll(".tabbar a").forEach((a) => a.classList.toggle("active", a.dataset.tab === tab));
   (routes[name] || renderHome)(params, rest.map(decodeURIComponent));
   updateSyncButton();
@@ -245,6 +246,40 @@ window.addEventListener("hashchange", () => {
   window.scrollTo(0, 0);
 });
 
+// ------------------------------------------------------------------ week comparison
+
+// A week's totals beside the week before (weeks run Sunday to Saturday), with the workouts in each.
+function renderCompare(params) {
+  const week = /^\d{4}-\d{2}-\d{2}$/.test(params.week || "") ? weekStart(params.week) : weekStart(localIsoDate());
+  const shift = (iso, days) => { const d = new Date(`${iso}T12:00:00`); d.setDate(d.getDate() + days); return localIsoDate(d); };
+  const before = shift(week, -7);
+  const ws = allWorkouts();
+  const weeks = weekly(ws);
+  const empty = { sessions: 0, swings: 0, volume_lb: 0, minutes: 0, bike_mi: 0, treadmill_mi: 0 };
+  const a = weeks.find((w) => w.week === week) || empty;
+  const b = weeks.find((w) => w.week === before) || empty;
+  const inWeek = (start) => ws.filter((w) => w.date >= start && w.date <= shift(start, 6))
+    .sort((x, y) => (x.date + (x.start || "")).localeCompare(y.date + (y.start || "")));
+  const cal = (list, end) => list.reduce((s, w) => s + (workoutCalories(w, end) || 0), 0);
+  const calText = (list) => { const lo = cal(list, "low"), hi = cal(list, "high"); return !hi ? "–" : lo === hi ? fmt(hi) : `${fmt(lo)}–${fmt(hi)}`; };
+  const rows = [["Sessions", "sessions", 0], ["Minutes", "minutes", 0], ["Bike (mi)", "bike_mi", 1], ["Treadmill (mi)", "treadmill_mi", 1],
+    ["Swings", "swings", 0], ["Volume (lb)", "volume_lb", 0]];
+  const delta = (x, y, d) => { const v = x - y; return v === 0 ? "±0" : `${v > 0 ? "+" : "−"}${fmt(Math.abs(v), d)}`; };
+  const label = (start) => `${shortDate(start)}–${shortDate(shift(start, 6))}`;
+  const list = (start) => { const l = inWeek(start); return l.length ? `<ul class="list">${l.map(workoutItem).join("")}</ul>` : `<p class="muted">No workouts.</p>`; };
+  view.innerHTML = `
+    <h1>Week of ${esc(shortDate(week))}</h1>
+    <div class="row"><a class="btn" href="#/compare?week=${before}">‹ Earlier</a>
+      ${week < weekStart(localIsoDate()) ? `<a class="btn" href="#/compare?week=${shift(week, 7)}">Later ›</a>` : ""}</div>
+    <div class="card table-wrap"><table><thead><tr><th></th><th class="r">${esc(label(week))}</th><th class="r">${esc(label(before))}</th><th class="r">Change</th></tr></thead>
+      <tbody>${rows.map(([name, k, d]) => `<tr><th>${name}</th><td class="r num">${fmt(a[k], d)}</td><td class="r num">${fmt(b[k], d)}</td>
+        <td class="r num">${delta(a[k], b[k], d)}</td></tr>`).join("")}
+      <tr><th>Calories</th><td class="r num">${calText(inWeek(week))}</td><td class="r num">${calText(inWeek(before))}</td><td></td></tr></tbody></table>
+      <p class="small muted">Weeks run Sunday to Saturday. Calories are a range because each source estimates them differently.</p></div>
+    <h2>${esc(label(week))}</h2><div class="card">${list(week)}</div>
+    <h2>${esc(label(before))}</h2><div class="card">${list(before)}</div>`;
+}
+
 // ------------------------------------------------------------------ home
 
 function renderHome() {
@@ -254,8 +289,9 @@ function renderHome() {
   lastWeekDate.setDate(lastWeekDate.getDate() - 7);
   const lastWeek = localIsoDate(lastWeekDate);
   const weeks = weekly(ws);
-  const cur = weeks.find((w) => w.week === thisWeek) || { sessions: 0, swings: 0, volume_lb: 0, minutes: 0 };
-  const prev = weeks.find((w) => w.week === lastWeek) || { sessions: 0, swings: 0, volume_lb: 0, minutes: 0 };
+  const empty = { sessions: 0, swings: 0, volume_lb: 0, minutes: 0, bike_mi: 0, treadmill_mi: 0 };
+  const cur = weeks.find((w) => w.week === thisWeek) || empty;
+  const prev = weeks.find((w) => w.week === lastWeek) || empty;
   const tile = (label, v, p, d = 0) =>
     `<div class="tile"><div class="label">${label}</div><div class="value">${fmt(v, d)}</div><div class="delta">Last week ${fmt(p, d)}</div></div>`;
   const ms = allMeasurements();
@@ -278,7 +314,10 @@ function renderHome() {
       ${tile("Minutes", cur.minutes, prev.minutes)}
       ${tile("Swings", cur.swings, prev.swings)}
       ${tile("Volume (lb)", cur.volume_lb, prev.volume_lb)}
+      ${tile("Bike (mi)", cur.bike_mi, prev.bike_mi, 1)}
+      ${tile("Treadmill (mi)", cur.treadmill_mi, prev.treadmill_mi, 1)}
     </div>
+    <p class="small"><a href="#/compare?week=${thisWeek}">Compare with last week</a></p>
     <div class="big-actions">
       <a class="btn primary" href="#/new">Log workout</a>
       <a class="btn" href="#/photo">Machine photo</a>
@@ -1445,7 +1484,7 @@ async function loadSetRows() {
   return state.setRows;
 }
 
-// Training minutes per day for ranges up to a month, per week (Monday start) beyond that.
+// Training minutes per day for ranges up to a month, per week (Sunday start) beyond that.
 function minutesBuckets(ws, from, to) {
   const daily = dayNum(to) - dayNum(from) < 31;
   const key = (iso) => (daily ? iso : weekStart(iso));
@@ -1494,7 +1533,7 @@ function renderReport(params) {
   const { daily, buckets } = minutesBuckets(ws, from, to);
   const workoutsHTML = ws.length ? `
     ${reportFigure(chartImage(barConfig(c, buckets.map(([d]) => shortDate(d)), buckets.map(([, v]) => v), "Minutes")),
-      "Training minutes chart", daily ? "Training minutes per day" : "Training minutes per week (weeks start Monday)")}
+      "Training minutes chart", daily ? "Training minutes per day" : "Training minutes per week (weeks start Sunday)")}
     ${reportTable(["Date", "Start", "Workout", "Minutes", "Reps", "Volume (lb)", "Distance (mi)", "Avg HR", "Calories"],
       ws.map((w) => [w.date, w.start || "–", w.title, fmt(w.duration_min, 1), fmt(w.total_reps || null), fmt(w.volume_lb || null),
         fmt(workoutDistance(w), 2), sv(w, "avg_hr") ?? synced(w, "avg_hr") ?? "–", calorieRange(w) ?? "–"]),
