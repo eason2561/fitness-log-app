@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.05-2 (your kettlebells, with photos)";
+const APP_VERSION = "2026.11.05-3 (one summary per workout, photos)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -153,14 +153,23 @@ function statLine(w) {
   if (w.swings) parts.push(`${fmt(w.swings)} swings`);
   if (w.total_reps && w.total_reps !== w.swings) parts.push(`${fmt(w.total_reps)} reps`);
   if (w.volume_lb) parts.push(`${fmt(w.volume_lb)} lb`);
-  for (const c of w.cardio || []) {
-    if (c.distance_mi) parts.push(`${fmt(c.distance_mi, 2)} mi`);
-    if (c.calories) parts.push(`${fmt(c.calories)} cal`);
-  }
-  if (!(w.cardio || []).some((c) => c.distance_mi) && synced(w, "distance_mi")) parts.push(`${fmt(synced(w, "distance_mi"), 2)} mi`);
-  if (synced(w, "avg_hr")) parts.push(`avg HR ${synced(w, "avg_hr")}`);
-  if (synced(w, "calories") && !(w.cardio || []).some((c) => c.calories)) parts.push(`${fmt(synced(w, "calories"))} cal`);
+  const dist = workoutDistance(w);
+  if (dist) parts.push(`${fmt(dist, 2)} mi`);
+  const hr = sv(w, "avg_hr") ?? synced(w, "avg_hr");
+  if (hr) parts.push(`avg HR ${hr}`);
+  const cal = calorieRange(w);
+  if (cal) parts.push(`${cal} cal`);
   return parts.join(" · ");
+}
+
+// The build's one summary per workout (build.summarize_sources): each value with the source it came from.
+const sv = (w, field) => w.summary?.[field]?.value ?? null;
+// Calories as a range across sources ("425–674"), since each source estimates them differently.
+function calorieRange(w) {
+  const c = w.summary?.calories;
+  if (c) return c.low === c.high ? fmt(c.low) : `${fmt(c.low)}–${fmt(c.high)}`;
+  const machine = (w.cardio || []).reduce((a, x) => a + (Number(x.calories) || 0), 0) || synced(w, "calories");
+  return machine ? fmt(machine) : null;
 }
 
 // Devices and services a workout's data came from, in order of preference (same order as build._first).
@@ -171,7 +180,7 @@ const syncedBadges = (w) => SYNCED.filter(([k]) => w[k]).map(([, name]) => `<spa
 
 function workoutItem(w) {
   return `<li><a href="#/workout/${encodeURIComponent(w.id)}">
-    <span><strong>${esc(w.title)}</strong> ${w.pending ? '<span class="badge">syncing</span>' : ""}${syncedBadges(w)}<br>
+    <span><strong>${esc(w.title)}</strong> ${w.pending ? '<span class="badge">syncing</span>' : ""}${syncedBadges(w)}${w.photos?.length ? ' <span class="badge">Photo</span>' : ""}<br>
     <span class="meta">${esc(statLine(w))}</span></span>
     <span class="meta num">${shortDate(w.date)}${w.start ? `<br>${esc(w.start)}` : ""}</span></a></li>`;
 }
@@ -805,6 +814,51 @@ async function drawErg(c2) {
   addChart("c-erg", { type: "line", data: { datasets: [line("Pace", pace, c.s1, "y"), line("Stroke rate", spm, c.s2, "y2")] }, options: o });
 }
 
+// One summary of a workout (the build's w.summary): each number from its definitive source, calories as a range.
+function summaryCardHTML(w) {
+  const s = w.summary;
+  if (!s || !Object.keys(s).length) return "";
+  const mmss = (min) => { const t = Math.round(min * 60); return `${Math.floor(t / 60)}:${pad(t % 60)}`; };
+  const row = (label, field, show) => s[field] ? [label, show(s[field].value), s[field].source] : null;
+  const c = s.calories;
+  const rows = [
+    row("Time", "duration_min", (v) => mmss(v)),
+    s.meters ? ["Distance", `${fmt(s.meters.value)} m (${fmt(sv(w, "distance_mi"), 2)} mi)`, s.meters.source]
+      : row("Distance", "distance_mi", (v) => `${fmt(v, 2)} mi`),
+    row("Climb", "climb_ft", (v) => `${fmt(v)} ft`),
+    row("Pace", "pace", (v) => String(v)),
+    row("Avg power", "avg_watts", (v) => `${fmt(v)} W`),
+    row("Stroke rate", "stroke_rate", (v) => `${fmt(v)} spm`),
+    row("Avg heart rate", "avg_hr", (v) => `${v} bpm`),
+    row("Max heart rate", "max_hr", (v) => `${v} bpm`),
+    c ? ["Calories", c.low === c.high ? fmt(c.low) : `${fmt(c.low)}–${fmt(c.high)}`,
+      c.low === c.high ? Object.keys(c.by_source).join(", ") : `${c.low_source} – ${c.high_source}`] : null,
+  ].filter(Boolean);
+  return `<h2>Summary</h2><div class="card"><table class="summary">${rows.map(([k, v, src]) =>
+    `<tr><th>${esc(k)}</th><td class="r num">${esc(v)}</td><td class="src small muted">${esc(src)}</td></tr>`).join("")}</table>
+    ${c && c.low !== c.high ? `<p class="small muted">Calories are a range: each source estimates them its own way.</p>` : ""}</div>`;
+}
+
+// Photos read into this workout (machine screens); loaded from the repo as needed.
+function photosHTML(w) {
+  if (!w.photos?.length) return "";
+  return `<h2>${w.photos.length === 1 ? "Photo" : "Photos"}</h2><div class="card photo-strip" id="photo-strip">${w.photos.map((p, i) =>
+    `<a class="photo-link" data-photo="${esc(p)}" href="${esc(repoUrl(p))}" target="_blank" rel="noopener">Photo ${i + 1}</a>`).join("")}</div>`;
+}
+
+async function loadPhotos(w) {
+  for (const a of document.querySelectorAll("#photo-strip [data-photo]")) {
+    try {
+      const url = URL.createObjectURL(await gh.getBlob(a.dataset.photo));
+      if (!a.isConnected) return;
+      a.href = url;
+      a.innerHTML = `<img src="${url}" alt="Workout photo">`;
+    } catch {
+      // offline or no token: the link to the file on GitHub stays
+    }
+  }
+}
+
 // Splits or intervals from the Concept2 monitor (src/fitlog/concept2.py splits()).
 function splitsTable(splits) {
   if (!splits?.length) return "";
@@ -843,8 +897,8 @@ function renderWorkout(_params, [id]) {
     ["Time", c2.duration_min != null ? `${fmt(c2.duration_min, 1)} min` : null], ["Distance", c2.meters != null ? `${fmt(c2.meters)} m` : null],
     ["Pace", c2.pace], ["Stroke rate", c2.stroke_rate], ["Avg heart rate", c2.avg_hr], ["Max heart rate", c2.max_hr],
     ["Avg power", c2.avg_watts != null ? `${c2.avg_watts} W` : null],
-    ["Calories", c2.calories != null ? fmt(c2.calories) : null], ["Drag factor", c2.drag_factor], ["Comments", c2.comments]]) +
-    (c2.stroke_file ? `<h3>Pace and stroke rate</h3><div class="card" id="erg-card"><p class="small muted">Loading the workout chart…</p></div>` : "") +
+    ["Calories", c2.calories != null ? fmt(c2.calories) : null], ["Drag factor", c2.drag_factor], ["Comments", c2.comments]]) : "";
+  const ergHTML = c2 ? (c2.stroke_file ? `<h2>Pace and stroke rate</h2><div class="card" id="erg-card"><p class="small muted">Loading the workout chart…</p></div>` : "") +
     splitsTable(c2.splits) : "";
   const st = w.strava;
   const stCard = st ? card("Strava", [["Name", st.name], ["Sport", st.sport],
@@ -853,7 +907,9 @@ function renderWorkout(_params, [id]) {
     ["Calories", st.calories != null ? fmt(st.calories) : null], ["Avg power", st.avg_watts != null ? `${st.avg_watts} W` : null], ["Device", st.device]]
     ) + `<p class="small"><a href="https://www.strava.com/activities/${encodeURIComponent(st.strava_id)}" target="_blank" rel="noopener">Open on Strava</a></p>` : "";
   const hrSrc = [pl, c2, st].find((b) => b?.hr_file);
-  const sourceCards = polarCard + c2Card + stCard + (hrSrc ? hrCardHTML() : "");
+  const detailCards = (cardio ? `<h2>Logged / machine photo</h2>${cardio}` : "") + polarCard + c2Card + stCard;
+  const sourceCards = summaryCardHTML(w) + photosHTML(w) + ergHTML + (hrSrc ? hrCardHTML() : "") +
+    (detailCards ? `<details class="sources"><summary>Details from each source</summary>${detailCards}</details>` : "");
   if (SYNCED_SOURCES.includes(w.source)) {
     const [key, name] = SYNCED.find(([k]) => k === w.source);
     view.innerHTML = `
@@ -864,20 +920,20 @@ function renderWorkout(_params, [id]) {
       <div class="row"><a class="btn primary" href="#/edit?${key}=${encodeURIComponent(w[key][`${key}_id`])}">Add workout details</a></div>`;
     if (hrSrc) drawHr(hrSrc);
     if (c2?.stroke_file) drawErg(c2);
+    loadPhotos(w);
     return;
   }
   view.innerHTML = `
     <h1>${esc(w.title)} ${w.pending ? '<span class="badge">syncing</span>' : ""}</h1>
     <p class="secondary">${longDate(w.date)}${w.start ? ` · ${esc(w.start)}` : ""}${w.rpe ? ` · RPE ${esc(w.rpe)}` : ""}</p>
-    <div class="grid-tiles">
+    ${exRows ? `<div class="grid-tiles">
       <div class="tile"><div class="label">Minutes</div><div class="value">${fmt(w.duration_min, 1)}</div></div>
       <div class="tile"><div class="label">Swings</div><div class="value">${fmt(w.swings)}</div></div>
       <div class="tile"><div class="label">Total reps</div><div class="value">${fmt(w.total_reps)}</div></div>
       <div class="tile"><div class="label">Volume (lb)</div><div class="value">${fmt(w.volume_lb)}</div></div>
-    </div>
+    </div>` : ""}
     ${exRows ? `<h2>Exercises</h2><div class="card table-wrap"><table><thead><tr><th>Exercise</th><th class="r">Reps</th>
       <th class="r">Heaviest (lb)</th><th class="r">Volume (lb)</th></tr></thead><tbody>${exRows}</tbody></table></div>` : ""}
-    ${cardio}
     ${sourceCards}
     ${w.notes ? `<h2>Notes</h2><div class="card">${esc(w.notes)}</div>` : ""}
     <div class="row">
@@ -888,6 +944,7 @@ function renderWorkout(_params, [id]) {
     </div>`;
   if (hrSrc) drawHr(hrSrc);
   if (c2?.stroke_file) drawErg(c2);
+  loadPhotos(w);
   document.getElementById("del-btn").onclick = async (e) => {
     if (!confirm(`Delete "${w.title}" on ${w.date}? This removes the file from the repo (git history keeps a copy).`)) return;
     e.target.disabled = true;
@@ -1398,12 +1455,14 @@ function minutesBuckets(ws, from, to) {
   return { daily, buckets: [...out.entries()] };
 }
 
-function workoutCalories(w) {
+function workoutCalories(w, end = "high") {
+  if (w.summary?.calories) return w.summary.calories[end];
   const machine = (w.cardio || []).reduce((a, c) => a + (Number(c.calories) || 0), 0);
   return machine || synced(w, "calories");
 }
 
 function workoutDistance(w) {
+  if (w.summary) return sv(w, "distance_mi");
   const machine = (w.cardio || []).reduce((a, c) => a + (Number(c.distance_mi) || 0), 0);
   return machine || synced(w, "distance_mi");
 }
@@ -1438,10 +1497,11 @@ function renderReport(params) {
       "Training minutes chart", daily ? "Training minutes per day" : "Training minutes per week (weeks start Monday)")}
     ${reportTable(["Date", "Start", "Workout", "Minutes", "Reps", "Volume (lb)", "Distance (mi)", "Avg HR", "Calories"],
       ws.map((w) => [w.date, w.start || "–", w.title, fmt(w.duration_min, 1), fmt(w.total_reps || null), fmt(w.volume_lb || null),
-        fmt(workoutDistance(w), 2), synced(w, "avg_hr") ?? "–", fmt(workoutCalories(w))]),
+        fmt(workoutDistance(w), 2), sv(w, "avg_hr") ?? synced(w, "avg_hr") ?? "–", calorieRange(w) ?? "–"]),
       [`${ws.length} workout${ws.length === 1 ? "" : "s"}`, "", "", fmt(r1(sum("duration_min")), 1), fmt(sum("total_reps")),
         fmt(r1(sum("volume_lb"))), fmt(ws.reduce((a, w) => a + (workoutDistance(w) || 0), 0) || null, 2), "",
-        fmt(ws.reduce((a, w) => a + (workoutCalories(w) || 0), 0) || null)], "lll")}` :
+        (() => { const lo = ws.reduce((a, w) => a + (workoutCalories(w, "low") || 0), 0), hi = ws.reduce((a, w) => a + (workoutCalories(w, "high") || 0), 0);
+          return !hi ? "–" : lo === hi ? fmt(hi) : `${fmt(lo)}–${fmt(hi)}`; })()], "lll")}` :
     `<p class="muted">No workouts in this range.</p>`;
 
   // Measurements.

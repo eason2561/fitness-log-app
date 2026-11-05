@@ -266,3 +266,9 @@ details summary { cursor: pointer; color: var(--accent); font-size: 0.85rem; mar
 .bell-pick { display: flex; gap: 8px; align-items: center; }
 .bell-pick select { flex: 1; min-width: 0; }
 .bell-thumb { width: 40px; height: 40px; object-fit: cover; border-radius: 8px; flex: none; }
+
+/* Workout summary and photos */
+table.summary td.src { text-align: right; padding-left: 8px; white-space: nowrap; }
+.photo-strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.photo-strip img { width: 100%; height: 180px; object-fit: cover; border-radius: 8px; display: block; }
+details.sources > summary { cursor: pointer; margin: 16px 0 8px; font-weight: 600; }

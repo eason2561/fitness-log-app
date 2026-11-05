@@ -47,7 +47,7 @@ export const textToBase64 = (text) => bytesToBase64(enc.encode(text));
 export const base64ToText = (b64) =>
   dec.decode(Uint8Array.from(atob(b64.replace(/\s/g, "")), (c) => c.charCodeAt(0)));
 
-async function call(method, path, { body, raw = false, query = "" } = {}) {
+async function call(method, path, { body, raw = false, blob = false, query = "" } = {}) {
   const s = loadSettings();
   if (!isConfigured(s)) throw new GitHubError(0, "Add your GitHub token in Settings first.");
   const url = `${API}/repos/${encodeURIComponent(s.owner)}/${encodeURIComponent(s.repo)}${path}${query}`;
@@ -77,7 +77,7 @@ async function call(method, path, { body, raw = false, query = "" } = {}) {
     throw new GitHubError(res.status, msg);
   }
   if (res.status === 204) return null;
-  return raw ? res.text() : res.json();
+  return blob ? res.blob() : raw ? res.text() : res.json();
 }
 
 const refQuery = () => {
@@ -94,6 +94,8 @@ export async function getText(path) {
 }
 
 export const getRaw = (path) => call("GET", contentPath(path), { raw: true, query: refQuery() });
+// A binary file (e.g. a workout photo) as a Blob, for an <img> via URL.createObjectURL.
+export const getBlob = (path) => call("GET", contentPath(path), { raw: true, blob: true, query: refQuery() });
 
 export async function putFile(path, base64, message, sha) {
   const branch = loadSettings().branch;
