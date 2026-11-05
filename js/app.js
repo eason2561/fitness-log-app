@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.05-5 (bike and treadmill miles, week comparison)";
+const APP_VERSION = "2026.11.05-7 (suspect readings left out)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -255,14 +255,14 @@ function renderCompare(params) {
   const before = shift(week, -7);
   const ws = allWorkouts();
   const weeks = weekly(ws);
-  const empty = { sessions: 0, swings: 0, volume_lb: 0, minutes: 0, bike_mi: 0, treadmill_mi: 0 };
+  const empty = { sessions: 0, swings: 0, volume_lb: 0, minutes: 0, bike_m: 0, treadmill_mi: 0 };
   const a = weeks.find((w) => w.week === week) || empty;
   const b = weeks.find((w) => w.week === before) || empty;
   const inWeek = (start) => ws.filter((w) => w.date >= start && w.date <= shift(start, 6))
     .sort((x, y) => (x.date + (x.start || "")).localeCompare(y.date + (y.start || "")));
   const cal = (list, end) => list.reduce((s, w) => s + (workoutCalories(w, end) || 0), 0);
   const calText = (list) => { const lo = cal(list, "low"), hi = cal(list, "high"); return !hi ? "–" : lo === hi ? fmt(hi) : `${fmt(lo)}–${fmt(hi)}`; };
-  const rows = [["Sessions", "sessions", 0], ["Minutes", "minutes", 0], ["Bike (mi)", "bike_mi", 1], ["Treadmill (mi)", "treadmill_mi", 1],
+  const rows = [["Sessions", "sessions", 0], ["Minutes", "minutes", 0], ["Bike (m)", "bike_m", 0], ["Treadmill (mi)", "treadmill_mi", 2],
     ["Swings", "swings", 0], ["Volume (lb)", "volume_lb", 0]];
   const delta = (x, y, d) => { const v = x - y; return v === 0 ? "±0" : `${v > 0 ? "+" : "−"}${fmt(Math.abs(v), d)}`; };
   const label = (start) => `${shortDate(start)}–${shortDate(shift(start, 6))}`;
@@ -289,7 +289,7 @@ function renderHome() {
   lastWeekDate.setDate(lastWeekDate.getDate() - 7);
   const lastWeek = localIsoDate(lastWeekDate);
   const weeks = weekly(ws);
-  const empty = { sessions: 0, swings: 0, volume_lb: 0, minutes: 0, bike_mi: 0, treadmill_mi: 0 };
+  const empty = { sessions: 0, swings: 0, volume_lb: 0, minutes: 0, bike_m: 0, treadmill_mi: 0 };
   const cur = weeks.find((w) => w.week === thisWeek) || empty;
   const prev = weeks.find((w) => w.week === lastWeek) || empty;
   const tile = (label, v, p, d = 0) =>
@@ -314,8 +314,8 @@ function renderHome() {
       ${tile("Minutes", cur.minutes, prev.minutes)}
       ${tile("Swings", cur.swings, prev.swings)}
       ${tile("Volume (lb)", cur.volume_lb, prev.volume_lb)}
-      ${tile("Bike (mi)", cur.bike_mi, prev.bike_mi, 1)}
-      ${tile("Treadmill (mi)", cur.treadmill_mi, prev.treadmill_mi, 1)}
+      ${tile("Bike (m)", cur.bike_m, prev.bike_m)}
+      ${tile("Treadmill (mi)", cur.treadmill_mi, prev.treadmill_mi, 2)}
     </div>
     <p class="small"><a href="#/compare?week=${thisWeek}">Compare with last week</a></p>
     <div class="big-actions">
@@ -1301,6 +1301,10 @@ function renderProgress(params) {
   const stepRows = daily.filter((r) => r.steps != null);
   const rhrRows = allMeasurements().filter((m) => m.kind === "resting_hr" && m.taken_at.slice(0, 10) >= sinceIso);
   const hrvRows = daily.filter((r) => r.hrv_ms != null);
+  // Readings marked suspect in config/suspect.yaml are kept out of the chart; say which.
+  const hrvSuspect = daily.filter((r) => r.suspect?.hrv_ms);
+  const hrvNote = `Nightly average (RMSSD). From Fitbit.${hrvSuspect.length ? ` Left out as suspect: ${hrvSuspect.map((r) =>
+    `${shortDate(r.date)} (${fmt(r.suspect.hrv_ms.value, 0)} ms)`).join(", ")}.` : ""}`;
   const newest = (rows) => rows.slice().reverse();
 
   const progressHash = (o = {}) => {
@@ -1360,7 +1364,7 @@ function renderProgress(params) {
         newest(stepRows).map((r) => [r.date, fmt(r.steps)])) : ""}
       ${rhrRows.length ? chartCard("c-rhr", "Resting heart rate (bpm)", null, ["Date", "bpm", "Source"],
         newest(rhrRows).map((m) => [m.taken_at.slice(0, 10), m.bpm, m.source === "fitbit" ? "Fitbit" : "Typed in"])) : ""}
-      ${hrvRows.length ? chartCard("c-hrv", "Heart rate variability (ms)", "Nightly average (RMSSD). From Fitbit.", ["Date", "HRV (ms)"],
+      ${hrvRows.length ? chartCard("c-hrv", "Heart rate variability (ms)", hrvNote, ["Date", "HRV (ms)"],
         newest(hrvRows).map((r) => [r.date, fmt(r.hrv_ms, 1)])) : ""}
     </div>` : ""}`;
 

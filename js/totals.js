@@ -128,13 +128,17 @@ export function localIsoDate(d = new Date()) {
 const BIKES = new Set(["bike_erg", "upright_bike", "recumbent_bike", "bike"]);
 const r2 = (x) => Math.round(x * 100) / 100;
 
-// ["bike" | "treadmill" | null, miles] for the weekly distance totals. Same rule as build.distance_kind.
+// ["bike", meters] | ["treadmill", miles] | [null, 0] for the weekly distance totals (bike in meters as the
+// BikeErg counts it, treadmill in miles). Same rule as build.distance_kind.
 export function distanceKind(w) {
   const machine = w.cardio?.[0]?.machine;
   const sport = String(w.strava?.sport || "");
   let miles = w.summary?.distance_mi?.value;
   if (miles == null) miles = (w.cardio || []).reduce((a, c) => a + (Number(c.distance_mi) || 0), 0);
-  if (BIKES.has(machine) || w.concept2?.machine === "bike_erg" || sport.includes("Ride")) return ["bike", miles || 0];
+  if (BIKES.has(machine) || w.concept2?.machine === "bike_erg" || sport.includes("Ride")) {
+    const meters = w.summary?.meters?.value;
+    return ["bike", meters != null ? Number(meters) : Math.round((miles || 0) * 1609.344)];
+  }
   if (machine === "treadmill" || w.title === "Treadmill") return ["treadmill", miles || 0];
   return [null, 0];
 }
@@ -143,13 +147,14 @@ export function weekly(workouts) {
   const m = new Map();
   for (const w of workouts) {
     const k = weekStart(w.date);
-    const e = m.get(k) || { week: k, sessions: 0, swings: 0, volume_lb: 0, minutes: 0, bike_mi: 0, treadmill_mi: 0 };
+    const e = m.get(k) || { week: k, sessions: 0, swings: 0, volume_lb: 0, minutes: 0, bike_m: 0, treadmill_mi: 0 };
     e.sessions += 1;
     e.swings += w.swings;
     e.volume_lb = r1(e.volume_lb + w.volume_lb);
     e.minutes = r1(e.minutes + (w.duration_min || 0));
-    const [kind, miles] = distanceKind(w);
-    if (kind) e[`${kind}_mi`] = r2(e[`${kind}_mi`] + miles);
+    const [kind, amount] = distanceKind(w);
+    if (kind === "bike") e.bike_m = Math.round(e.bike_m + amount);
+    else if (kind === "treadmill") e.treadmill_mi = r2(e.treadmill_mi + amount);
     m.set(k, e);
   }
   return [...m.values()].sort((a, b) => a.week.localeCompare(b.week));
