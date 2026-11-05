@@ -3,10 +3,10 @@
 
 import * as gh from "./github.js";
 import * as outbox from "./outbox.js";
-import { Catalog, summarize, weekly, weekStart, localIsoDate, slug } from "./totals.js";
+import { Catalog, summarize, weekly, weekStart, localIsoDate, slug, distanceKind } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.05-7 (suspect readings left out)";
+const APP_VERSION = "2026.11.05-10 (no broken dates or entries)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -128,8 +128,11 @@ const pad = (n) => String(n).padStart(2, "0");
 const nowTime = () => { const d = new Date(); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 const nowLocal = () => `${localIsoDate()}T${nowTime()}`;
 const hoursMin = (min) => (min == null ? "–" : `${Math.floor(min / 60)} h ${String(Math.round(min % 60)).padStart(2, "0")} m`);
-const shortDate = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-const longDate = (iso) => new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+// Keep a short piece of text on one line: non-breaking spaces, and no break at a dash ("403–678").
+const keep = (text) => String(text).replace(/ /g, "\u00a0").replace(/([–-])/g, "\u2060$1\u2060");
+// Dates never break across lines (Dave, 2026-11-04).
+const shortDate = (iso) => keep(new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" }));
+const longDate = (iso) => keep(new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }));
 const workoutPath = (id) => `data/manual/workouts/${id.slice(0, 4)}/${id}.yaml`;
 const repoUrl = (path) => {
   const s = gh.loadSettings();
@@ -150,16 +153,18 @@ function toast(msg, ms = 3500) {
 function statLine(w) {
   const parts = [];
   if (w.duration_min) parts.push(`${fmt(w.duration_min, 1)} min`);
-  if (w.swings) parts.push(`${fmt(w.swings)} swings`);
+  const oneHand = w.exercises?.kb_swing_1arm?.total_reps || 0;
+  if (w.swings) parts.push(`${fmt(w.swings)} swings${oneHand ? ` (${fmt(oneHand)} one-hand)` : ""}`);
   if (w.total_reps && w.total_reps !== w.swings) parts.push(`${fmt(w.total_reps)} reps`);
   if (w.volume_lb) parts.push(`${fmt(w.volume_lb)} lb`);
-  const dist = workoutDistance(w);
-  if (dist) parts.push(`${fmt(dist, 2)} mi`);
+  const dist = distanceText(w);
+  if (dist) parts.push(dist);
   const hr = sv(w, "avg_hr") ?? synced(w, "avg_hr");
   if (hr) parts.push(`avg HR ${hr}`);
   const cal = calorieRange(w);
   if (cal) parts.push(`${cal} cal`);
-  return parts.join(" · ");
+  // Each item stays whole; lines break only between items (Dave, 2026-11-04).
+  return parts.map(keep).join(" · ");
 }
 
 // The build's one summary per workout (build.summarize_sources): each value with the source it came from.
@@ -167,7 +172,7 @@ const sv = (w, field) => w.summary?.[field]?.value ?? null;
 // Calories as a range across sources ("425–674"), since each source estimates them differently.
 function calorieRange(w) {
   const c = w.summary?.calories;
-  if (c) return c.low === c.high ? fmt(c.low) : `${fmt(c.low)}–${fmt(c.high)}`;
+  if (c) return c.low === c.high ? fmt(c.low) : keep(`${fmt(c.low)}–${fmt(c.high)}`);
   const machine = (w.cardio || []).reduce((a, x) => a + (Number(x.calories) || 0), 0) || synced(w, "calories");
   return machine ? fmt(machine) : null;
 }
@@ -182,7 +187,7 @@ function workoutItem(w) {
   return `<li><a href="#/workout/${encodeURIComponent(w.id)}">
     <span><strong>${esc(w.title)}</strong> ${w.pending ? '<span class="badge">syncing</span>' : ""}${syncedBadges(w)}${w.photos?.length ? ' <span class="badge">Photo</span>' : ""}<br>
     <span class="meta">${esc(statLine(w))}</span></span>
-    <span class="meta num">${shortDate(w.date)}${w.start ? `<br>${esc(w.start)}` : ""}</span></a></li>`;
+    <span class="meta num nowrap">${shortDate(w.date)}${w.start ? `<br>${esc(w.start)}` : ""}</span></a></li>`;
 }
 
 function setupNotice() {
@@ -261,11 +266,13 @@ function renderCompare(params) {
   const inWeek = (start) => ws.filter((w) => w.date >= start && w.date <= shift(start, 6))
     .sort((x, y) => (x.date + (x.start || "")).localeCompare(y.date + (y.start || "")));
   const cal = (list, end) => list.reduce((s, w) => s + (workoutCalories(w, end) || 0), 0);
-  const calText = (list) => { const lo = cal(list, "low"), hi = cal(list, "high"); return !hi ? "–" : lo === hi ? fmt(hi) : `${fmt(lo)}–${fmt(hi)}`; };
+  const calText = (list) => { const lo = cal(list, "low"), hi = cal(list, "high"); return !hi ? "–" : lo === hi ? fmt(hi) : keep(`${fmt(lo)}–${fmt(hi)}`); };
   const rows = [["Sessions", "sessions", 0], ["Minutes", "minutes", 0], ["Bike (m)", "bike_m", 0], ["Treadmill (mi)", "treadmill_mi", 2],
     ["Swings", "swings", 0], ["Volume (lb)", "volume_lb", 0]];
   const delta = (x, y, d) => { const v = x - y; return v === 0 ? "±0" : `${v > 0 ? "+" : "−"}${fmt(Math.abs(v), d)}`; };
-  const label = (start) => `${shortDate(start)}–${shortDate(shift(start, 6))}`;
+  // "Nov 1–7", or "Oct 26–Nov 1" across a month end; always on one line.
+  const label = (start) => { const end = shift(start, 6);
+    return keep(start.slice(0, 7) === end.slice(0, 7) ? `${shortDate(start)}–${Number(end.slice(8))}` : `${shortDate(start)}–${shortDate(end)}`); };
   const list = (start) => { const l = inWeek(start); return l.length ? `<ul class="list">${l.map(workoutItem).join("")}</ul>` : `<p class="muted">No workouts.</p>`; };
   view.innerHTML = `
     <h1>Week of ${esc(shortDate(week))}</h1>
@@ -274,7 +281,8 @@ function renderCompare(params) {
     <div class="card table-wrap"><table><thead><tr><th></th><th class="r">${esc(label(week))}</th><th class="r">${esc(label(before))}</th><th class="r">Change</th></tr></thead>
       <tbody>${rows.map(([name, k, d]) => `<tr><th>${name}</th><td class="r num">${fmt(a[k], d)}</td><td class="r num">${fmt(b[k], d)}</td>
         <td class="r num">${delta(a[k], b[k], d)}</td></tr>`).join("")}
-      <tr><th>Calories</th><td class="r num">${calText(inWeek(week))}</td><td class="r num">${calText(inWeek(before))}</td><td></td></tr></tbody></table>
+      </tbody></table>
+      <p class="small"><strong>Calories</strong> <span class="nowrap">${label(week)}: ${calText(inWeek(week))}</span> · <span class="nowrap">${label(before)}: ${calText(inWeek(before))}</span></p>
       <p class="small muted">Weeks run Sunday to Saturday. Calories are a range because each source estimates them differently.</p></div>
     <h2>${esc(label(week))}</h2><div class="card">${list(week)}</div>
     <h2>${esc(label(before))}</h2><div class="card">${list(before)}</div>`;
@@ -630,6 +638,17 @@ view.addEventListener("change", (e) => {
     return;
   }
   setPath(state.editor.draft, el.dataset.path, readInput(el));
+  // One-hand swings are logged per arm: tick "Per side" when the exercise is picked.
+  if (el.dataset.path.endsWith(".exercise") && catalog.resolve(el.value) === "kb_swing_1arm") {
+    const holder = el.dataset.path.split(".").slice(0, -1).reduce((o, k) => o[k], state.editor.draft);
+    if (holder.per_side == null) {
+      holder.per_side = true;
+      persistDraft();
+      drawEditor();
+      toast("One-hand swings: reps are per arm (Per side ticked).");
+      return;
+    }
+  }
   persistDraft();
   if (el.hasAttribute("data-rerender")) drawEditor();
   else updateLive();
@@ -870,7 +889,7 @@ function summaryCardHTML(w) {
     row("Stroke rate", "stroke_rate", (v) => `${fmt(v)} spm`),
     row("Avg heart rate", "avg_hr", (v) => `${v} bpm`),
     row("Max heart rate", "max_hr", (v) => `${v} bpm`),
-    c ? ["Calories", c.low === c.high ? fmt(c.low) : `${fmt(c.low)}–${fmt(c.high)}`,
+    c ? ["Calories", c.low === c.high ? fmt(c.low) : keep(`${fmt(c.low)}–${fmt(c.high)}`),
       c.low === c.high ? Object.keys(c.by_source).join(", ") : `${c.low_source} – ${c.high_source}`] : null,
   ].filter(Boolean);
   return `<h2>Summary</h2><div class="card"><table class="summary">${rows.map(([k, v, src]) =>
@@ -1330,7 +1349,8 @@ function renderProgress(params) {
       ${rangeBtn("12", "12 wk")}${rangeBtn("26", "26 wk")}${rangeBtn("52", "1 yr")}${rangeBtn("all", "All")}</div></div>
     <h2>Weekly training</h2>
     <div class="charts">
-      ${chartCard("c-swings", "Swings per week", null, ["Week", "Swings"], wkRows("swings"))}
+      ${chartCard("c-swings", "Swings per week", weeks.some((w) => w.swings_1arm) ? "Two-hand and other swings, with one-hand swings (both arms) stacked on top" : null,
+        ["Week", "Swings", "One-hand"], weeks.map((w) => [`Week of ${w.week}`, fmt(w.swings), fmt(w.swings_1arm || 0)]))}
       ${chartCard("c-minutes", "Training minutes per week", null, ["Week", "Minutes"], wkRows("minutes", 1))}
       ${chartCard("c-volume", "Volume per week (lb)", "Reps × weight × bells", ["Week", "Volume (lb)"], wkRows("volume_lb"))}
       ${chartCard("c-sessions", "Sessions per week", null, ["Week", "Sessions"], wkRows("sessions"))}
@@ -1338,8 +1358,6 @@ function renderProgress(params) {
     <h2>Exercise progress</h2>
     ${exList.length ? `<label>Exercise<select id="ex-pick">${exList.map((x) => `<option value="${esc(x)}" ${x === ex ? "selected" : ""}>${esc(catalog.name(x))}</option>`).join("")}</select></label>
       <div class="charts">
-      ${chartCard("c-ex-weight", `${catalog.name(ex)}: heaviest weight per session (lb)`, null, ["Date", "Heaviest (lb)", "Reps"],
-        exSessions.map((w) => [w.date, fmt(w.exercises[ex].max_weight_lb, 1), fmt(w.exercises[ex].total_reps)]))}
       ${chartCard("c-ex-reps", `${catalog.name(ex)}: reps per session`, null, ["Date", "Reps"],
         exSessions.map((w) => [w.date, fmt(w.exercises[ex].total_reps)]))}
       </div>` : `<div class="card muted">Log a few workouts to see exercise trends.</div>`}
@@ -1371,15 +1389,20 @@ function renderProgress(params) {
   const pick = document.getElementById("ex-pick");
   if (pick) pick.onchange = () => (location.hash = progressHash({ ex: pick.value }));
 
-  addChart("c-swings", barConfig(c, labels, weeks.map((w) => w.swings), "Swings"));
+  if (weeks.some((w) => w.swings_1arm)) {
+    const cfg = barConfig(c, labels, weeks.map((w) => w.swings - (w.swings_1arm || 0)), "Two-hand and other");
+    cfg.data.datasets.push({ ...cfg.data.datasets[0], label: "One-hand", data: weeks.map((w) => w.swings_1arm || 0),
+      backgroundColor: c.s2, hoverBackgroundColor: c.s2 });
+    cfg.options.scales.x.stacked = true;
+    cfg.options.scales.y.stacked = true;
+    cfg.options.plugins.legend.display = true;
+    addChart("c-swings", cfg);
+  } else addChart("c-swings", barConfig(c, labels, weeks.map((w) => w.swings), "Swings"));
   addChart("c-minutes", barConfig(c, labels, weeks.map((w) => w.minutes), "Minutes"));
   addChart("c-volume", barConfig(c, labels, weeks.map((w) => w.volume_lb), "Volume (lb)"));
   addChart("c-sessions", barConfig(c, labels, weeks.map((w) => w.sessions), "Sessions"));
   if (ex) {
     const exLabels = exSessions.map((w) => shortDate(w.date));
-    addChart("c-ex-weight", { type: "line", data: { labels: exLabels,
-      datasets: [lineDataset(c, "Heaviest (lb)", exSessions.map((w) => w.exercises[ex].max_weight_lb), c.s1)] },
-      options: { ...baseOptions(c), scales: { ...baseOptions(c).scales, y: { ...baseOptions(c).scales.y, beginAtZero: false } } } });
     addChart("c-ex-reps", barConfig(c, exLabels, exSessions.map((w) => w.exercises[ex].total_reps), "Reps"));
   }
   if (bp.length && bpView === "split") addChart("c-bp", bpSplitConfig(c, sessions));
@@ -1504,6 +1527,14 @@ function workoutCalories(w, end = "high") {
   return machine || synced(w, "calories");
 }
 
+// A workout's distance with its unit: bikes (the BikeErg) in meters, everything else in miles (Dave, 2026-11-04).
+function distanceText(w) {
+  const [kind, amount] = distanceKind(w);
+  if (kind === "bike") return amount ? `${fmt(amount)} m` : null;
+  const miles = workoutDistance(w);
+  return miles ? `${fmt(miles, 2)} mi` : null;
+}
+
 function workoutDistance(w) {
   if (w.summary) return sv(w, "distance_mi");
   const machine = (w.cardio || []).reduce((a, c) => a + (Number(c.distance_mi) || 0), 0);
@@ -1538,11 +1569,14 @@ function renderReport(params) {
   const workoutsHTML = ws.length ? `
     ${reportFigure(chartImage(barConfig(c, buckets.map(([d]) => shortDate(d)), buckets.map(([, v]) => v), "Minutes")),
       "Training minutes chart", daily ? "Training minutes per day" : "Training minutes per week (weeks start Sunday)")}
-    ${reportTable(["Date", "Start", "Workout", "Minutes", "Reps", "Volume (lb)", "Distance (mi)", "Avg HR", "Calories"],
+    ${reportTable(["Date", "Start", "Workout", "Minutes", "Reps", "Volume (lb)", "Distance", "Avg HR", "Calories"],
       ws.map((w) => [w.date, w.start || "–", w.title, fmt(w.duration_min, 1), fmt(w.total_reps || null), fmt(w.volume_lb || null),
-        fmt(workoutDistance(w), 2), sv(w, "avg_hr") ?? synced(w, "avg_hr") ?? "–", calorieRange(w) ?? "–"]),
+        distanceText(w) ?? "–", sv(w, "avg_hr") ?? synced(w, "avg_hr") ?? "–", calorieRange(w) ?? "–"]),
       [`${ws.length} workout${ws.length === 1 ? "" : "s"}`, "", "", fmt(r1(sum("duration_min")), 1), fmt(sum("total_reps")),
-        fmt(r1(sum("volume_lb"))), fmt(ws.reduce((a, w) => a + (workoutDistance(w) || 0), 0) || null, 2), "",
+        fmt(r1(sum("volume_lb"))), (() => {
+          const bike = ws.reduce((a, w) => a + (distanceKind(w)[0] === "bike" ? distanceKind(w)[1] : 0), 0);
+          const miles = ws.reduce((a, w) => a + (distanceKind(w)[0] === "bike" ? 0 : workoutDistance(w) || 0), 0);
+          return [bike ? `${fmt(bike)} m` : "", miles ? `${fmt(miles, 2)} mi` : ""].filter(Boolean).join(" + ") || "–"; })(), "",
         (() => { const lo = ws.reduce((a, w) => a + (workoutCalories(w, "low") || 0), 0), hi = ws.reduce((a, w) => a + (workoutCalories(w, "high") || 0), 0);
           return !hi ? "–" : lo === hi ? fmt(hi) : `${fmt(lo)}–${fmt(hi)}`; })()], "lll")}` :
     `<p class="muted">No workouts in this range.</p>`;

@@ -147,9 +147,10 @@ export function weekly(workouts) {
   const m = new Map();
   for (const w of workouts) {
     const k = weekStart(w.date);
-    const e = m.get(k) || { week: k, sessions: 0, swings: 0, volume_lb: 0, minutes: 0, bike_m: 0, treadmill_mi: 0 };
+    const e = m.get(k) || { week: k, sessions: 0, swings: 0, volume_lb: 0, minutes: 0, bike_m: 0, treadmill_mi: 0, swings_1arm: 0 };
     e.sessions += 1;
     e.swings += w.swings;
+    e.swings_1arm += w.exercises?.kb_swing_1arm?.total_reps || 0;
     e.volume_lb = r1(e.volume_lb + w.volume_lb);
     e.minutes = r1(e.minutes + (w.duration_min || 0));
     const [kind, amount] = distanceKind(w);
