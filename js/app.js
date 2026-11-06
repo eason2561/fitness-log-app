@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug, distanceKind } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.06-2 (Data sources table updates after every sync)";
+const APP_VERSION = "2026.11.06-3 (Data sources: today with the time, one date per source)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -139,7 +139,13 @@ const hoursMin = (min) => (min == null ? "–" : `${Math.floor(min / 60)} h ${St
 // Keep a short piece of text on one line: non-breaking spaces, and no break at a dash ("403–678").
 const keep = (text) => String(text).replace(/ /g, "\u00a0").replace(/([–-])/g, "\u2060$1\u2060");
 // Dates never break across lines (Dave, 2026-11-04).
-const shortTime = (iso) => keep(new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }));
+const clock = (d) => d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+// "today 8:15 AM" for a time today, otherwise "Nov 4, 8:15 AM".
+const shortTime = (iso) => {
+  const d = new Date(iso);
+  return keep(d.toDateString() === new Date().toDateString() ? `today ${clock(d)}`
+    : d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }));
+};
 const shortDate = (iso) => keep(new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" }));
 const longDate = (iso) => keep(new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }));
 const workoutPath = (id) => `data/manual/workouts/${id.slice(0, 4)}/${id}.yaml`;
@@ -2236,11 +2242,12 @@ function healthList() {
     if (name === "Photos") status = s.waiting ? `${s.waiting} waiting to be read (the desk reads them)` : "none waiting";
     else if (!s.connected) status = "not connected";
     else if (bad.has(name)) status = "needs attention";
-    else status = `working${s.last_run ? ` · synced ${shortTime(s.last_run.at)}` : ""}${s.latest ? ` · latest ${shortDate(s.latest)}` : ""}`;
+    else if (s.latest === localIsoDate()) status = `working · today${s.last_run && new Date(s.last_run.at).toDateString() === new Date().toDateString() ? ` ${clock(new Date(s.last_run.at))}` : ""}`;
+    else status = `working${s.latest ? ` · latest ${shortDate(s.latest)}` : ""}`; // newest data; today's shows the sync time
     return `<tr><th>${esc(name)}</th><td class="r ${bad.has(name) ? "notice-text" : ""}">${esc(status)}</td></tr>`;
   }).join("");
   return `<table>${rows}</table>${h.problems.map((p) => `<p class="small notice error">${esc(p.source)}: ${esc(p.message)}<br>Fix: ${esc(p.fix)}</p>`).join("")}
-    <p class="small muted">Updated ${esc(new Date(h.checked_at).toLocaleString())}, after each sync and every morning. Problems found in the morning check also open a GitHub issue, which GitHub emails you.</p>`;
+    <p class="small muted">Updated ${esc(shortTime(h.checked_at))}, after each sync and every morning. Problems found in the morning check also open a GitHub issue, which GitHub emails you.</p>`;
 }
 
 const syncedCount = (key) => state.bundle.workouts.filter((w) => w[key]).length;
