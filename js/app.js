@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug, distanceKind } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.06-1 (Back to Settings after connecting works)";
+const APP_VERSION = "2026.11.06-2 (Data sources table updates after every sync)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -139,6 +139,7 @@ const hoursMin = (min) => (min == null ? "–" : `${Math.floor(min / 60)} h ${St
 // Keep a short piece of text on one line: non-breaking spaces, and no break at a dash ("403–678").
 const keep = (text) => String(text).replace(/ /g, "\u00a0").replace(/([–-])/g, "\u2060$1\u2060");
 // Dates never break across lines (Dave, 2026-11-04).
+const shortTime = (iso) => keep(new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }));
 const shortDate = (iso) => keep(new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" }));
 const longDate = (iso) => keep(new Date(`${iso}T12:00:00`).toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" }));
 const workoutPath = (id) => `data/manual/workouts/${id.slice(0, 4)}/${id}.yaml`;
@@ -2225,21 +2226,21 @@ function healthNotice() {
     <br><a href="#/settings">Settings</a></div>`;
 }
 
-// Settings: each source as of the daily check.
+// Settings: each source as of the last sync or the daily check, whichever came later.
 function healthList() {
   const h = state.health;
-  if (!h) return `<p class="small muted">Not checked yet. The check runs every morning after the syncs (Actions → Check data sources).</p>`;
+  if (!h) return `<p class="small muted">Not checked yet. The table updates after every sync and each morning (Actions → Check data sources).</p>`;
   const bad = new Set(h.problems.map((p) => p.source));
   const rows = Object.entries(h.sources).map(([name, s]) => {
     let status;
     if (name === "Photos") status = s.waiting ? `${s.waiting} waiting to be read (the desk reads them)` : "none waiting";
     else if (!s.connected) status = "not connected";
     else if (bad.has(name)) status = "needs attention";
-    else status = `working${s.latest ? ` · latest ${shortDate(s.latest)}` : ""}`;
+    else status = `working${s.last_run ? ` · synced ${shortTime(s.last_run.at)}` : ""}${s.latest ? ` · latest ${shortDate(s.latest)}` : ""}`;
     return `<tr><th>${esc(name)}</th><td class="r ${bad.has(name) ? "notice-text" : ""}">${esc(status)}</td></tr>`;
   }).join("");
   return `<table>${rows}</table>${h.problems.map((p) => `<p class="small notice error">${esc(p.source)}: ${esc(p.message)}<br>Fix: ${esc(p.fix)}</p>`).join("")}
-    <p class="small muted">Checked ${esc(new Date(h.checked_at).toLocaleString())}. Problems also open a GitHub issue, which GitHub emails you.</p>`;
+    <p class="small muted">Updated ${esc(new Date(h.checked_at).toLocaleString())}, after each sync and every morning. Problems found in the morning check also open a GitHub issue, which GitHub emails you.</p>`;
 }
 
 const syncedCount = (key) => state.bundle.workouts.filter((w) => w[key]).length;
