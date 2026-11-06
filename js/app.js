@@ -6,7 +6,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug, distanceKind } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.05-12 (data source check; shorter history lines)";
+const APP_VERSION = "2026.11.06-1 (Back to Settings after connecting works)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -254,6 +254,17 @@ function route() {
 }
 
 window.addEventListener("hashchange", () => {
+  state.hold = false;
+  route();
+  window.scrollTo(0, 0);
+});
+
+// A link to the hash already in the address bar fires no hashchange (e.g. "Back to Settings" after a
+// Connect sign-in, which has already set #/settings), so render that page directly.
+document.addEventListener("click", (e) => {
+  const a = e.target.closest?.('a[href^="#/"]');
+  if (!a || a.getAttribute("href") !== location.hash || e.defaultPrevented) return;
+  e.preventDefault();
   state.hold = false;
   route();
   window.scrollTo(0, 0);
