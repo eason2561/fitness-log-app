@@ -2,11 +2,12 @@
 // No build step; plain ES modules. js-yaml and Chart.js are vendored globals.
 
 import * as gh from "./github.js";
+import * as auth from "./shared-auth.js";
 import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug, distanceKind } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.06-3 (Data sources: today with the time, one date per source)";
+const APP_VERSION = "2026.11.11-1 (one GitHub token shared with Keep and Money)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -206,7 +207,7 @@ function workoutItem(w) {
 }
 
 function setupNotice() {
-  return gh.isConfigured() ? "" :
+  return gh.isConfigured() ? auth.expiryBanner() :
     `<div class="notice">Connect this app to your GitHub repo to load and save data. <a href="#/settings">Open Settings</a></div>`;
 }
 
@@ -1988,16 +1989,16 @@ async function renderSettings() {
   const s = gh.loadSettings();
   let ops = [];
   try { ops = await outbox.list(); } catch {}
-  view.innerHTML = `<h1>Settings</h1>
+  view.innerHTML = `${auth.expiryBanner()}<h1>Settings</h1>
     <form id="s-form" class="card stack">
       <div class="grid-2">
-        <label>GitHub owner<input name="owner" value="${esc(s.owner)}" required autocapitalize="off"></label>
+        <label>GitHub owner<input name="owner" value="${esc(s.owner)}" required autocapitalize="off" autocomplete="username"></label>
         <label>Repository<input name="repo" value="${esc(s.repo)}" required autocapitalize="off"></label>
       </div>
       <label>Branch<input name="branch" value="${esc(s.branch)}" placeholder="default branch" autocapitalize="off"></label>
-      <label>Access token<input name="token" type="password" value="${esc(s.token)}" autocomplete="off" placeholder="github_pat_…"></label>
-      <p class="field-hint">Create a <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">fine-grained token</a>
-        with access to <strong>only this repository</strong> and <strong>Contents: Read and write</strong>. It's stored only in this browser.</p>
+      <label>Access token<input name="token" type="password" value="${esc(s.token)}" autocomplete="current-password" placeholder="github_pat_…"></label>
+      <label>Token expires (for a reminder)<input name="expires" type="date" value="${esc(auth.loadShared().expires)}"></label>
+      <p class="field-hint">${auth.TOKEN_HELP} It's stored only in this browser.</p>
       <div class="row"><button class="primary" type="submit">Save &amp; test</button>
         <button type="button" id="s-refresh">Reload data</button></div>
       <p id="s-status" class="small"></p>
@@ -2077,8 +2078,9 @@ async function renderSettings() {
   document.getElementById("s-form").onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);
+    auth.saveShared({ token: f.get("token").trim(), expires: f.get("expires") });
     gh.saveSettings({ ...gh.loadSettings(), owner: f.get("owner").trim(), repo: f.get("repo").trim(),
-      branch: f.get("branch").trim(), token: f.get("token").trim() });
+      branch: f.get("branch").trim() }, { dropLegacyToken: true });
     status.textContent = "Testing…";
     try {
       const info = await gh.repoInfo();

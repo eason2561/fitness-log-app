@@ -1,9 +1,9 @@
 // Caches the app shell so it opens offline. Data always comes from api.github.com
 // (never cached here); unsynced writes wait in the IndexedDB outbox.
-const VERSION = "fitlog-v36"; // keep in step with APP_VERSION in js/app.js
+const VERSION = "fitlog-v37"; // keep in step with APP_VERSION in js/app.js
 const SHELL = [
   "./", "index.html", "styles.css", "manifest.webmanifest", "icon.svg", "icon-192.png",
-  "js/app.js", "js/github.js", "js/outbox.js", "js/totals.js",
+  "js/app.js", "js/github.js", "js/shared-auth.js", "js/outbox.js", "js/totals.js",
   "vendor/js-yaml.min.js", "vendor/chart.umd.min.js",
   "bells/25lb.jpg", "bells/24kg.jpg", "bells/60lb.jpg", "bells/32kg.jpg",
 ];

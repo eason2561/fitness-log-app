@@ -199,6 +199,7 @@ details summary { cursor: pointer; color: var(--accent); font-size: 0.85rem; mar
 
 .notice { background: var(--surface-2); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; font-size: 0.9rem; }
 .notice.error { color: var(--danger); }
+.token-banner { background: var(--surface-2); border: 1px solid var(--danger); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; font-size: 0.9rem; }
 .photo-item { display: grid; grid-template-columns: 88px 1fr; gap: 12px; align-items: start; }
 .photo-item .wide { grid-column: 1 / -1; }
 .photo-item .grid-2 > label, .photo-item input, .photo-item select { min-width: 0; }

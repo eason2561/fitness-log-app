@@ -1,5 +1,7 @@
 // Minimal GitHub contents-API client. All data stays in the private repo;
-// this page only talks to api.github.com with the token saved in Settings.
+// this page only talks to api.github.com with the token saved in Settings (shared with Keep and
+// Money through shared-auth.js).
+import { resolveToken } from "./shared-auth.js";
 
 const API = "https://api.github.com";
 
@@ -11,22 +13,24 @@ export class GitHubError extends Error {
   }
 }
 
-export function loadSettings() {
+function stored() {
   try {
-    return {
-      owner: "eason2561",
-      repo: "Fitness-Log",
-      branch: "",
-      token: "",
-      ...JSON.parse(localStorage.getItem("fitlog:settings") || "{}"),
-    };
+    return JSON.parse(localStorage.getItem("fitlog:settings") || "{}");
   } catch {
-    return { owner: "eason2561", repo: "Fitness-Log", branch: "", token: "" };
+    return {};
   }
 }
 
-export function saveSettings(s) {
-  localStorage.setItem("fitlog:settings", JSON.stringify(s));
+export function loadSettings() {
+  const s = { owner: "eason2561", repo: "Fitness-Log", branch: "", token: "", ...stored() };
+  return { ...s, token: resolveToken(s.token) };
+}
+
+// The token itself is saved with shared-auth.js. A token this app saved before that is kept
+// until it's replaced, unless dropLegacyToken.
+export function saveSettings({ token, ...rest }, { dropLegacyToken = false } = {}) {
+  const legacy = dropLegacyToken ? "" : stored().token;
+  localStorage.setItem("fitlog:settings", JSON.stringify({ ...rest, ...(legacy ? { token: legacy } : {}) }));
 }
 
 export function isConfigured(s = loadSettings()) {
