@@ -7,7 +7,7 @@ import * as outbox from "./outbox.js";
 import { Catalog, summarize, weekly, weekStart, localIsoDate, slug, distanceKind } from "./totals.js";
 
 // Bump with sw.js VERSION on every app change; shown in Settings so you can tell which version is running.
-const APP_VERSION = "2026.11.11-1 (one GitHub token shared with Keep and Money)";
+const APP_VERSION = "2026.11.19-1 (token expiry date shared across devices)";
 const yaml = window.jsyaml;
 const view = document.getElementById("view");
 
@@ -2079,6 +2079,7 @@ async function renderSettings() {
     e.preventDefault();
     const f = new FormData(e.target);
     auth.saveShared({ token: f.get("token").trim(), expires: f.get("expires") });
+    auth.syncExpiry();
     gh.saveSettings({ ...gh.loadSettings(), owner: f.get("owner").trim(), repo: f.get("repo").trim(),
       branch: f.get("branch").trim() }, { dropLegacyToken: true });
     status.textContent = "Testing…";
@@ -2362,6 +2363,7 @@ async function handleOAuthReturn() {
 
 if (new URLSearchParams(location.search).has("code")) handleOAuthReturn();
 else route();
+auth.syncExpiry().then((changed) => { if (changed && !state.editor) route(); });
 refresh({ quiet: true });
 syncNow();
 window.addEventListener("online", () => syncNow().then(() => refresh({ quiet: true })));
